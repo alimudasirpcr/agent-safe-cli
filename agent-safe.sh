@@ -16,7 +16,7 @@
 
 set -euo pipefail
 
-VERSION="0.2.0"
+VERSION="0.3.0"
 
 # Resolve the directory where this script lives (for finding prompts/)
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -30,6 +30,8 @@ MODEL_FLAG=""
 MAX_TURNS=40
 WRITE_MODE=false
 MULTI_DOMAIN=""
+PROVIDER="${AGENT_SAFE_PROVIDER:-claude}"
+AI_MODEL="${AGENT_SAFE_MODEL:-}"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -68,14 +70,18 @@ Commands:
   review summary [DOMAIN] "GOAL"   Generate pre-review summary (RV-04)
 
 Options:
-  --model MODEL                     Claude model to use
-  --max-turns N                     Max Claude turns per call (default: 40)
+  --provider PROVIDER              AI provider: claude, openai, gemini, ollama (default: claude)
+  --model MODEL                    Model name (provider-specific, e.g. gpt-4o, gemini-2.0-flash)
+  --max-turns N                    Max turns per call (default: 40, Claude only)
   -h, --help                        Show this help
   -v, --version                     Show version
 
-Files:
-  _agent/                           Framework state — created by init/adopt
-  ~/.agent-safe/                    Logs and cached prompts
+Environment:
+  AGENT_SAFE_PROVIDER               Default provider (overridden by --provider)
+  AGENT_SAFE_MODEL                  Default model (overridden by --model)
+  AGENT_SAFE_PROMPTS_DIR            Override prompts/ directory
+  OPENAI_API_KEY                    Required for --provider openai
+  GEMINI_API_KEY                    Required for --provider gemini
 EOF
 }
 
@@ -212,17 +218,55 @@ is_safe_path() {
 }
 
 preflight() {
-  local need_claude="${1:-true}"
+  local need_ai="${1:-true}"
   local need_git="${2:-true}"
   local failed=false
 
-  if [ "$need_claude" = true ]; then
-    for cmd in claude jq; do
-      if ! command -v "$cmd" &>/dev/null; then
-        log_error "  $cmd ... NOT FOUND"
+  if [ "$need_ai" = true ]; then
+    case "$PROVIDER" in
+      claude)
+        for cmd in claude; do
+          if ! command -v "$cmd" &>/dev/null; then
+            log_error "  $cmd ... NOT FOUND (required for --provider claude)"
+            failed=true
+          fi
+        done
+        ;;
+      openai)
+        for cmd in curl jq; do
+          if ! command -v "$cmd" &>/dev/null; then
+            log_error "  $cmd ... NOT FOUND (required for --provider openai)"
+            failed=true
+          fi
+        done
+        if [ -z "${OPENAI_API_KEY:-}" ]; then
+          log_error "  OPENAI_API_KEY ... NOT SET"
+          failed=true
+        fi
+        ;;
+      gemini)
+        for cmd in curl jq; do
+          if ! command -v "$cmd" &>/dev/null; then
+            log_error "  $cmd ... NOT FOUND (required for --provider gemini)"
+            failed=true
+          fi
+        done
+        if [ -z "${GEMINI_API_KEY:-}" ]; then
+          log_error "  GEMINI_API_KEY ... NOT SET"
+          failed=true
+        fi
+        ;;
+      ollama)
+        if ! command -v ollama &>/dev/null; then
+          log_error "  ollama ... NOT FOUND (install from https://ollama.com)"
+          failed=true
+        fi
+        ;;
+      *)
+        log_error "  Unknown provider: $PROVIDER"
         failed=true
-      fi
-    done
+        ;;
+    esac
   fi
 
   if [ "$need_git" = true ] && ! git rev-parse --is-inside-work-tree &>/dev/null; then
@@ -235,16 +279,22 @@ preflight() {
     exit 1
   fi
 
+  log "Provider: ${PROVIDER}${AI_MODEL:+ (model: ${AI_MODEL})}"
+
   resolve_project_root
   mkdir -p "$LOG_DIR"
   chmod 700 "$LOG_DIR"
 }
 
+# ============================================================================
+# AI Provider runners
+# ============================================================================
+
 # Run claude -p, stream output to a log file, return exit code
-run_claude() {
+run_ai_claude() {
   local prompt="$1"
   local out_file="$2"
-  local claude_exit=0
+  local exit_code=0
 
   # shellcheck disable=SC2086
   claude -p "$prompt" \
@@ -253,10 +303,118 @@ run_claude() {
     $MODEL_FLAG \
     > "$out_file" 2>&1 &
   CHILD_PID=$!
-  wait "$CHILD_PID" || claude_exit=$?
+  wait "$CHILD_PID" || exit_code=$?
   CHILD_PID=""
-  return $claude_exit
+  return $exit_code
 }
+
+# Run OpenAI API via curl
+run_ai_openai() {
+  local prompt="$1"
+  local out_file="$2"
+  local model="${AI_MODEL:-gpt-4o}"
+
+  if [ -z "${OPENAI_API_KEY:-}" ]; then
+    log_error "OPENAI_API_KEY not set. Export it or set it in .env"
+    return 1
+  fi
+
+  # Write prompt to temp file for safe JSON encoding
+  local prompt_file
+  prompt_file=$(mktemp)
+  printf '%s' "$prompt" > "$prompt_file"
+
+  # Build JSON body with escaped prompt
+  local body_file
+  body_file=$(mktemp)
+  jq -n \
+    --arg model "$model" \
+    --arg prompt "$(cat "$prompt_file")" \
+    '{model: $model, messages: [{role: "user", content: $prompt}]}' \
+    > "$body_file"
+
+  curl -s https://api.openai.com/v1/chat/completions \
+    -H "Authorization: Bearer $OPENAI_API_KEY" \
+    -H "Content-Type: application/json" \
+    -d @"$body_file" \
+    | jq -r '.choices[0].message.content // .error.message // "No response"' \
+    > "$out_file"
+
+  local exit_code=$?
+  rm -f "$prompt_file" "$body_file"
+  return $exit_code
+}
+
+# Run Google Gemini API via curl
+run_ai_gemini() {
+  local prompt="$1"
+  local out_file="$2"
+  local model="${AI_MODEL:-gemini-2.0-flash}"
+
+  if [ -z "${GEMINI_API_KEY:-}" ]; then
+    log_error "GEMINI_API_KEY not set. Export it or set it in .env"
+    return 1
+  fi
+
+  local prompt_file body_file
+  prompt_file=$(mktemp)
+  printf '%s' "$prompt" > "$prompt_file"
+
+  body_file=$(mktemp)
+  jq -n \
+    --arg prompt "$(cat "$prompt_file")" \
+    '{contents: [{parts: [{text: $prompt}]}]}' \
+    > "$body_file"
+
+  curl -s "https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_API_KEY}" \
+    -H "Content-Type: application/json" \
+    -d @"$body_file" \
+    | jq -r '.candidates[0].content.parts[0].text // .error.message // "No response"' \
+    > "$out_file"
+
+  local exit_code=$?
+  rm -f "$prompt_file" "$body_file"
+  return $exit_code
+}
+
+# Run Ollama locally
+run_ai_ollama() {
+  local prompt="$1"
+  local out_file="$2"
+  local model="${AI_MODEL:-llama3}"
+  local exit_code=0
+
+  if ! command -v ollama &>/dev/null; then
+    log_error "ollama not found. Install it: https://ollama.com"
+    return 1
+  fi
+
+  ollama run "$model" "$prompt" > "$out_file" 2>&1 &
+  CHILD_PID=$!
+  wait "$CHILD_PID" || exit_code=$?
+  CHILD_PID=""
+  return $exit_code
+}
+
+# Dispatch to the correct provider
+run_ai() {
+  local prompt="$1"
+  local out_file="$2"
+
+  case "$PROVIDER" in
+    claude)  run_ai_claude "$prompt" "$out_file" ;;
+    openai)  run_ai_openai "$prompt" "$out_file" ;;
+    gemini)  run_ai_gemini "$prompt" "$out_file" ;;
+    ollama)  run_ai_ollama "$prompt" "$out_file" ;;
+    *)
+      log_error "Unknown provider: $PROVIDER. Use: claude, openai, gemini, ollama"
+      return 1
+      ;;
+  esac
+}
+
+# Backwards-compatible alias
+run_claude() { run_ai "$@"; }
 
 # Carve out files delimited by marker pairs and write them to disk.
 # Format expected in input file:
@@ -2025,7 +2183,9 @@ fi
 declare -a PREPASS_ARGS=()
 while [ $# -gt 0 ]; do
   case "$1" in
-    --model) MODEL_FLAG="--model $2"; shift 2 ;;
+    --model) AI_MODEL="$2"; shift 2 ;;
+    --model-flag) MODEL_FLAG="--model $2"; shift 2 ;;
+    --provider) PROVIDER="$2"; shift 2 ;;
     --max-turns) MAX_TURNS="$2"; shift 2 ;;
     --multi-domain)
       # Next arg is a domain list only if it contains a comma or is "all".
