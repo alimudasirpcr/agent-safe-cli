@@ -70,7 +70,8 @@ Commands:
   review summary [DOMAIN] "GOAL"   Generate pre-review summary (RV-04)
 
 Options:
-  --provider PROVIDER              AI provider: claude, openai, gemini, ollama (default: claude)
+  --provider PROVIDER              AI provider: claude, openai, gemini, ollama, custom
+                                    (default: claude)
   --model MODEL                    Model name (provider-specific, e.g. gpt-4o, gemini-2.0-flash)
   --max-turns N                    Max turns per call (default: 40, Claude only)
   -h, --help                        Show this help
@@ -80,6 +81,9 @@ Environment:
   AGENT_SAFE_PROVIDER               Default provider (overridden by --provider)
   AGENT_SAFE_MODEL                  Default model (overridden by --model)
   AGENT_SAFE_PROMPTS_DIR            Override prompts/ directory
+  AGENT_SAFE_AI_CMD                 Custom AI command (for --provider custom)
+                                    Use {{PROMPT}} as placeholder, e.g.:
+                                    AGENT_SAFE_AI_CMD='my-ai-cli --model x {{PROMPT}}'
   OPENAI_API_KEY                    Required for --provider openai
   GEMINI_API_KEY                    Required for --provider gemini
 EOF
@@ -262,6 +266,14 @@ preflight() {
           failed=true
         fi
         ;;
+      custom)
+        if [ -z "${AGENT_SAFE_AI_CMD:-}" ]; then
+          log_error "  AGENT_SAFE_AI_CMD ... NOT SET (required for --provider custom)"
+          failed=true
+        else
+          log "  Custom command: ${AGENT_SAFE_AI_CMD%% *}"
+        fi
+        ;;
       *)
         log_error "  Unknown provider: $PROVIDER"
         failed=true
@@ -396,6 +408,39 @@ run_ai_ollama() {
   return $exit_code
 }
 
+# Run custom command. AGENT_SAFE_AI_CMD must be set to the full command
+# with {{PROMPT}} as placeholder for the prompt text.
+# Example: AGENT_SAFE_AI_CMD="ollama launch claude --model glm-5.1:cloud {{PROMPT}}"
+run_ai_custom() {
+  local prompt="$1"
+  local out_file="$2"
+
+  if [ -z "${AGENT_SAFE_AI_CMD:-}" ]; then
+    log_error "AGENT_SAFE_AI_CMD not set. Set it to your command with {{PROMPT}} as prompt placeholder."
+    log_error "Example: AGENT_SAFE_AI_CMD='ollama launch claude --model glm-5.1:cloud {{PROMPT}}'"
+    return 1
+  fi
+
+  # Write prompt to temp file to avoid shell escaping issues
+  local prompt_file
+  prompt_file=$(mktemp)
+  printf '%s\n' "$prompt" > "$prompt_file"
+
+  # Replace {{PROMPT}} with the temp file path (using @file syntax for safety)
+  local cmd="${AGENT_SAFE_AI_CMD//\{\{PROMPT\}\}/$(cat "$prompt_file")}"
+
+  # If {{PROMPT}} wasn't in the command, append the prompt file path
+  if [[ "$AGENT_SAFE_AI_CMD" != *'{{PROMPT}}'* ]]; then
+    cmd="${AGENT_SAFE_AI_CMD} $(cat "$prompt_file")"
+  fi
+
+  log "Running custom command: ${AGENT_SAFE_AI_CMD%% *}"
+  eval "$cmd" > "$out_file" 2>&1
+  local exit_code=$?
+  rm -f "$prompt_file"
+  return $exit_code
+}
+
 # Dispatch to the correct provider
 run_ai() {
   local prompt="$1"
@@ -406,8 +451,9 @@ run_ai() {
     openai)  run_ai_openai "$prompt" "$out_file" ;;
     gemini)  run_ai_gemini "$prompt" "$out_file" ;;
     ollama)  run_ai_ollama "$prompt" "$out_file" ;;
+    custom)  run_ai_custom "$prompt" "$out_file" ;;
     *)
-      log_error "Unknown provider: $PROVIDER. Use: claude, openai, gemini, ollama"
+      log_error "Unknown provider: $PROVIDER. Use: claude, openai, gemini, ollama, custom"
       return 1
       ;;
   esac
