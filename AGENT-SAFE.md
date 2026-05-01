@@ -1,6 +1,68 @@
 # agent-safe CLI Documentation
 
-A bash CLI that wraps the AI Agent Safety Framework. It assembles prompts, manages `_agent/` state files, and constrains AI agents (Claude) to scoped domains with permission boundaries.
+A CLI that wraps the AI Agent Safety Framework. It assembles prompts, manages `_agent/` state files, and constrains AI agents to scoped domains with permission boundaries.
+
+## Install
+
+```bash
+# Clone the repo
+git clone https://github.com/alimudasirpcr/agent-safe-cli.git
+```
+
+## Running
+
+**Mac / Linux:**
+```bash
+./agent-safe.sh adopt
+```
+
+**Windows (PowerShell or CMD):**
+```cmd
+agent-safe.cmd adopt
+```
+
+The `.cmd` wrapper auto-detects Git Bash — no manual setup needed.
+
+## Quick Start (new project)
+
+```bash
+# 1. Clone the CLI into your project (or add to PATH)
+git clone https://github.com/alimudasirpcr/agent-safe-cli.git .agent-safe-cli
+
+# 2. Copy the example config and edit it
+# Mac/Linux:
+cp .agent-safe-cli/agent-safe.env.example .agent-safe.env
+# Windows:
+copy .agent-safe-cli\agent-safe.env.example .agent-safe.env
+
+# 3. Add .gitignore
+# Mac/Linux:
+echo '.agent-safe.env
+_agent/' >> .gitignore
+# Windows PowerShell:
+Add-Content .gitignore '.agent-safe.env
+_agent/'
+
+# 4. Set up the framework
+# Mac/Linux:
+.agent-safe-cli/agent-safe.sh adopt
+# Windows:
+.agent-safe-cli\agent-safe.cmd adopt
+
+# 5. Tag and verify
+# Mac/Linux:
+.agent-safe-cli/agent-safe.sh tag --write
+.agent-safe-cli/agent-safe.sh verify
+# Windows:
+.agent-safe-cli\agent-safe.cmd tag --write
+.agent-safe-cli\agent-safe.cmd verify
+
+# 6. Start a session
+# Mac/Linux:
+.agent-safe-cli/agent-safe.sh start "Add ceiling method"
+# Windows:
+.agent-safe-cli\agent-safe.cmd start "Add ceiling method"
+```
 
 ## Quick Reference
 
