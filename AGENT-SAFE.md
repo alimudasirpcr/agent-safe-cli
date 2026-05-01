@@ -28,18 +28,81 @@ These can be placed before or after the subcommand.
 
 | Flag | Description |
 |------|-------------|
-| `--model MODEL` | Claude model to use (e.g. `sonnet`, `opus`) |
+| `--provider PROVIDER` | AI provider: `claude`, `openai`, `gemini`, `ollama`, `custom` |
+| `--model MODEL` | Model name (provider-specific) |
 | `--max-turns N` | Max turns per Claude call (default: 40) |
 | `--write` | Write mode for `tag` — inserts tags into source files |
 | `--multi-domain [D1,D2,...]` | Multi-domain mode for `start` — open access across listed domains |
 | `-h, --help` | Show help |
 | `-v, --version` | Show version |
 
+### AI Providers
+
+By default, `agent-safe` calls the Claude CLI for setup commands (`init`, `adopt`, `tag`, `verify`). You can change the provider with `--provider` or the `AGENT_SAFE_PROVIDER` env var.
+
+| Provider | Flag | What it calls |
+|----------|------|----------------|
+| `claude` | `--provider claude` | Claude CLI (`claude`) |
+| `openai` | `--provider openai` | OpenAI API via curl |
+| `gemini` | `--provider gemini` | Gemini API via curl |
+| `ollama` | `--provider ollama` | Ollama API |
+| `custom` | `--provider custom` | Your own command via `AGENT_SAFE_AI_CMD` |
+
+```bash
+# Use OpenAI
+agent-safe --provider openai --model gpt-4o adopt
+
+# Use Gemini
+agent-safe --provider gemini --model gemini-2.0-flash tag --write
+
+# Use a custom command
+agent-safe --provider custom adopt
+```
+
+For custom providers, set `AGENT_SAFE_AI_CMD` in `.agent-safe.env` or as an env var:
+
+```bash
+# Prompt is piped via stdin
+AGENT_SAFE_AI_CMD="ollama launch claude --model glm-5.1:cloud"
+
+# Use {{PROMPT}} to remove it from command (prompt still piped via stdin)
+AGENT_SAFE_AI_CMD="ollama launch claude --model glm-5.1:cloud {{PROMPT}}"
+
+# Use {{PROMPT_FILE}} to pass a file path instead (no stdin piping)
+AGENT_SAFE_AI_CMD="my-ai-tool --file {{PROMPT_FILE}}"
+```
+
+| Placeholder | Behavior |
+|-------------|----------|
+| `{{PROMPT}}` | Removed from command; prompt content piped via stdin |
+| `{{PROMPT_FILE}}` | Replaced with temp file path containing the prompt |
+
+### Configuration File
+
+Create `.agent-safe.env` in your project root (or `~/.agent-safe/.env` for global config). Project-local values take precedence over global, and env vars take precedence over both.
+
+```bash
+# .agent-safe.env
+AGENT_SAFE_PROVIDER=custom
+AGENT_SAFE_AI_CMD=ollama launch claude --model glm-5.1:cloud {{PROMPT}}
+# AGENT_SAFE_MODEL=gpt-4o
+# OPENAI_API_KEY=sk-...
+# GEMINI_API_KEY=...
+# AGENT_SAFE_MAX_TURNS=40
+# AGENT_SAFE_PROMPTS_DIR=/path/to/prompts
+```
+
 ### Environment Variables
 
 | Variable | Description |
 |----------|-------------|
+| `AGENT_SAFE_PROVIDER` | AI provider: `claude` (default), `openai`, `gemini`, `ollama`, `custom` |
+| `AGENT_SAFE_MODEL` | Model name (provider-specific) |
+| `AGENT_SAFE_AI_CMD` | Custom AI command (only with `--provider custom`) |
+| `AGENT_SAFE_MAX_TURNS` | Max turns per Claude call (default: 40) |
 | `AGENT_SAFE_PROMPTS_DIR` | Override default `prompts/` directory for templates |
+| `OPENAI_API_KEY` | Required for `--provider openai` |
+| `GEMINI_API_KEY` | Required for `--provider gemini` |
 
 ### Log Files
 

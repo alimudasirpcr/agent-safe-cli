@@ -14,7 +14,9 @@
 #   agent-safe -h | --help
 #   agent-safe -v | --version
 
-set -euo pipefail
+set -uo pipefail
+# Note: removed -e (errexit) to prevent silent exits on non-zero returns from AI commands
+# Errors are handled explicitly with if/return checks in run_ai_* functions
 
 VERSION="0.3.0"
 
@@ -113,8 +115,9 @@ Environment:
   AGENT_SAFE_MODEL                  Default model (overridden by --model)
   AGENT_SAFE_PROMPTS_DIR            Override prompts/ directory
   AGENT_SAFE_AI_CMD                 Custom AI command (for --provider custom)
-                                    Use {{PROMPT}} as placeholder, e.g.:
-                                    AGENT_SAFE_AI_CMD='my-ai-cli --model x {{PROMPT}}'
+                                    {{PROMPT}} → removed, prompt piped via stdin
+                                    {{PROMPT_FILE}} → replaced with temp file path
+                                    e.g. AGENT_SAFE_AI_CMD='my-ai-cli --model x {{PROMPT}}'
   OPENAI_API_KEY                    Required for --provider openai
   GEMINI_API_KEY                    Required for --provider gemini
 
@@ -429,18 +432,44 @@ run_ai_ollama() {
   local prompt="$1"
   local out_file="$2"
   local model="${AI_MODEL:-llama3}"
-  local exit_code=0
 
   if ! command -v ollama &>/dev/null; then
     log_error "ollama not found. Install it: https://ollama.com"
     return 1
   fi
 
-  ollama run "$model" "$prompt" > "$out_file" 2>&1 &
-  CHILD_PID=$!
-  wait "$CHILD_PID" || exit_code=$?
-  CHILD_PID=""
-  return $exit_code
+  # Write prompt to temp file and redirect stdin from it
+  # This is more reliable than piping, especially on Windows/Git Bash
+  local prompt_file
+  prompt_file=$(mktemp)
+  printf '%s\n' "$prompt" > "$prompt_file"
+
+  # --nowordwrap disables word wrapping; TERM=dumb suppresses spinner/progress
+  local exit_code
+  set +o pipefail
+  TERM=dumb ollama run "$model" --nowordwrap < "$prompt_file" > "$out_file" 2>&1
+  exit_code=$?
+  set -o pipefail
+  rm -f "$prompt_file"
+
+  if [ $exit_code -ne 0 ]; then
+    log_error "ollama exited with code $exit_code. See ${out_file}"
+    return $exit_code
+  fi
+
+  # Strip ANSI escape codes and spinner characters from output
+  # Ollama emits spinner chars and ANSI control sequences even with TERM=dumb
+  local raw
+  raw=$(cat "$out_file")
+  local clean
+  clean=$(printf '%s\n' "$raw" \
+    | sed 's/\x1b\[[0-9;]*[a-zA-Z]//g' \
+    | sed 's/\x1b\[[?][0-9;]*[a-zA-Z]//g' \
+    | sed 's/[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] //g' \
+    | sed '/^$/d')
+  printf '%s\n' "$clean" > "$out_file"
+
+  return 0
 }
 
 # Run custom command. AGENT_SAFE_AI_CMD must be set to the full command
@@ -456,24 +485,53 @@ run_ai_custom() {
     return 1
   fi
 
-  # Write prompt to temp file to avoid shell escaping issues
+  # Write prompt to temp file
   local prompt_file
   prompt_file=$(mktemp)
   printf '%s\n' "$prompt" > "$prompt_file"
 
-  # Replace {{PROMPT}} with the temp file path (using @file syntax for safety)
-  local cmd="${AGENT_SAFE_AI_CMD//\{\{PROMPT\}\}/$(cat "$prompt_file")}"
+  # Build command:
+  # {{PROMPT}}      → removed from command, prompt piped via stdin
+  # {{PROMPT_FILE}} → replaced with temp file path (for tools that accept file args)
+  local cmd="$AGENT_SAFE_AI_CMD"
+  local pipe_stdin=true
 
-  # If {{PROMPT}} wasn't in the command, append the prompt file path
-  if [[ "$AGENT_SAFE_AI_CMD" != *'{{PROMPT}}'* ]]; then
-    cmd="${AGENT_SAFE_AI_CMD} $(cat "$prompt_file")"
+  if [[ "$cmd" == *'{{PROMPT_FILE}}'* ]]; then
+    cmd="${cmd//\{\{PROMPT_FILE\}\}/${prompt_file}}"
+    pipe_stdin=false
   fi
 
+  if [[ "$cmd" == *'{{PROMPT}}'* ]]; then
+    # Remove {{PROMPT}} from command — prompt will be piped via stdin instead
+    # This avoids shell escaping issues with multi-line prompt content
+    cmd="${cmd//\{\{PROMPT\}\}/}"
+    # Clean up trailing/leading whitespace and double spaces left after removal
+    while [[ "$cmd" == *"  "* ]]; do cmd="${cmd//  / }"; done
+    cmd="${cmd# }"; cmd="${cmd% }"
+    pipe_stdin=true
+  fi
+
+  # If no placeholder at all, pipe via stdin
   log "Running custom command: ${AGENT_SAFE_AI_CMD%% *}"
-  eval "$cmd" > "$out_file" 2>&1
-  local exit_code=$?
+
+  local exit_code
+  if $pipe_stdin; then
+    # Redirect stdin from the prompt file for reliability on Windows/Git Bash
+    set +o pipefail
+    eval "$cmd" < "$prompt_file" > "$out_file" 2>&1
+    exit_code=$?
+    set -o pipefail
+  else
+    eval "$cmd" > "$out_file" 2>&1
+    exit_code=$?
+  fi
   rm -f "$prompt_file"
-  return $exit_code
+
+  if [ $exit_code -ne 0 ]; then
+    log_error "Custom command exited with code $exit_code. See ${out_file}"
+    return $exit_code
+  fi
+  return 0
 }
 
 # Dispatch to the correct provider
@@ -516,7 +574,7 @@ extract_and_write_files() {
       current_path="${BASH_REMATCH[1]}"
       current_path=$(echo "$current_path" | xargs)
       if ! is_safe_path "$current_path"; then
-        log_error "  skipping unsafe path: $current_path (outside project root)"
+        log_error "  skipping unsafe path: $current_path (outside project root)" >&2
         current_path=""
         continue
       fi
@@ -530,7 +588,7 @@ extract_and_write_files() {
         buffer=$(echo "$buffer" | sed -e '1{/^```/d}' -e '${/^```$/d}')
         mkdir -p "$(dirname "$current_path")"
         printf '%s\n' "$buffer" > "$current_path"
-        log_success "  wrote $current_path"
+        log_success "  wrote $current_path" >&2
         count=$((count + 1))
       fi
       in_file=false
@@ -561,9 +619,16 @@ cmd_init() {
   preflight true
 
   if [ -d "_agent" ]; then
-    log_error "_agent/ already exists. Use 'agent-safe adopt' for existing projects,"
-    log_error "or remove _agent/ first if you want to re-init."
-    exit 1
+    log_warn "_agent/ already exists from a previous run."
+    echo -n "Remove it and re-init? [y/N] "
+    read -r answer
+    if [[ "$answer" =~ ^[Yy]$ ]]; then
+      rm -rf _agent
+      log "Removed _agent/"
+    else
+      log "Aborted. Keeping existing _agent/ directory."
+      exit 0
+    fi
   fi
 
   echo "I'll ask you six sections of questions about your project, then generate"
@@ -681,8 +746,9 @@ EOF
   log "Writing files..."
   local n
   n=$(extract_and_write_files "$out_file")
+  n="${n//[^0-9]/}"
 
-  if [ "$n" -eq 0 ]; then
+  if [ "$n" -eq 0 ] 2>/dev/null; then
     log_error "No files were extracted from Claude's output. See ${out_file}"
     exit 1
   fi
@@ -707,8 +773,16 @@ cmd_adopt() {
   preflight true
 
   if [ -d "_agent" ]; then
-    log_error "_agent/ already exists. Remove it first if you want to re-adopt."
-    exit 1
+    log_warn "_agent/ already exists from a previous run."
+    echo -n "Remove it and re-adopt? [y/N] "
+    read -r answer
+    if [[ "$answer" =~ ^[Yy]$ ]]; then
+      rm -rf _agent
+      log "Removed _agent/"
+    else
+      log "Aborted. Keeping existing _agent/ directory."
+      exit 0
+    fi
   fi
 
   log "Scanning project structure..."
@@ -807,8 +881,9 @@ EOF
   log "Writing files..."
   local n
   n=$(extract_and_write_files "$gen_out")
+  n="${n//[^0-9]/}"
 
-  if [ "$n" -eq 0 ]; then
+  if [ "$n" -eq 0 ] 2>/dev/null; then
     log_error "No files extracted. See ${gen_out}"
     exit 1
   fi
