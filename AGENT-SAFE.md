@@ -5,9 +5,11 @@ A CLI that wraps the AI Agent Safety Framework. It assembles prompts, manages `_
 ## Install
 
 ```bash
-# Clone the repo
-git clone https://github.com/alimudasirpcr/agent-safe-cli.git
+# Clone the CLI into your project
+git clone https://github.com/alimudasirpcr/agent-safe-cli.git .agent-safe-cli
 ```
+
+That's it. The CLI folder stays hidden (dot prefix) and you never edit it.
 
 ## Running
 
@@ -16,52 +18,47 @@ git clone https://github.com/alimudasirpcr/agent-safe-cli.git
 ./agent-safe.sh adopt
 ```
 
-**Windows (PowerShell or CMD):**
-```cmd
-agent-safe.cmd adopt
+**Windows (PowerShell or CMD) — just type `agent-safe`:**
+```powershell
+# Copy the ONE wrapper file into your project root:
+copy .agent-safe-cli\agent-safe.cmd .
+# Then just run:
+agent-safe adopt
 ```
 
-The `.cmd` wrapper auto-detects Git Bash — no manual setup needed.
+The `.cmd` wrapper auto-finds Git Bash. No PATH setup needed.
 
 ## Quick Start (new project)
 
 ```bash
-# 1. Clone the CLI into your project (or add to PATH)
+# 1. Clone the CLI
 git clone https://github.com/alimudasirpcr/agent-safe-cli.git .agent-safe-cli
 
-# 2. Copy the example config and edit it
-# Mac/Linux:
-cp .agent-safe-cli/agent-safe.env.example .agent-safe.env
-# Windows:
+# 2. Copy config and wrapper (Windows)
+copy .agent-safe-cli\agent-safe.cmd .
 copy .agent-safe-cli\agent-safe.env.example .agent-safe.env
-
-# 3. Add .gitignore
 # Mac/Linux:
+cp .agent-safe-cli/agent-safe.sh .
+cp .agent-safe-cli/agent-safe.env.example .agent-safe.env
+
+# 3. Edit .agent-safe.env — set your provider and model
+
+# 4. Add to .gitignore
 echo '.agent-safe.env
 _agent/' >> .gitignore
-# Windows PowerShell:
-Add-Content .gitignore '.agent-safe.env
-_agent/'
 
-# 4. Set up the framework
-# Mac/Linux:
-.agent-safe-cli/agent-safe.sh adopt
+# 5. Set up the framework
 # Windows:
-.agent-safe-cli\agent-safe.cmd adopt
+agent-safe adopt
+# Mac/Linux:
+./agent-safe.sh adopt
 
-# 5. Tag and verify
-# Mac/Linux:
-.agent-safe-cli/agent-safe.sh tag --write
-.agent-safe-cli/agent-safe.sh verify
-# Windows:
-.agent-safe-cli\agent-safe.cmd tag --write
-.agent-safe-cli\agent-safe.cmd verify
+# 6. Tag and verify
+agent-safe tag --write
+agent-safe verify
 
-# 6. Start a session
-# Mac/Linux:
-.agent-safe-cli/agent-safe.sh start "Add ceiling method"
-# Windows:
-.agent-safe-cli\agent-safe.cmd start "Add ceiling method"
+# 7. Start a session
+agent-safe start "Add ceiling method"
 ```
 
 ## Quick Reference

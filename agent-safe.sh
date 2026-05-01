@@ -34,6 +34,8 @@ _load_env() {
   fi
   for cfg in "${config_files[@]}"; do
     while IFS= read -r line || [ -n "$line" ]; do
+      # Strip Windows carriage return
+      line="${line%$'\r'}"
       # Skip comments and empty lines
       [[ "$line" =~ ^[[:space:]]*# ]] && continue
       [[ -z "${line// /}" ]] && continue
