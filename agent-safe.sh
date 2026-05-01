@@ -18,6 +18,37 @@ set -euo pipefail
 
 VERSION="0.3.0"
 
+# Load config from .agent-safe.env files (project-local first, then global)
+# Env vars take precedence over config file values.
+_load_env() {
+  local config_files=()
+  # Project-local config (in current working directory)
+  if [ -f ".agent-safe.env" ]; then
+    config_files+=(".agent-safe.env")
+  fi
+  # Global config (in home directory)
+  if [ -f "$HOME/.agent-safe/.env" ]; then
+    config_files+=("$HOME/.agent-safe/.env")
+  fi
+  for cfg in "${config_files[@]}"; do
+    while IFS= read -r line || [ -n "$line" ]; do
+      # Skip comments and empty lines
+      [[ "$line" =~ ^[[:space:]]*# ]] && continue
+      [[ -z "${line// /}" ]] && continue
+      # Only export valid KEY=VALUE lines
+      if [[ "$line" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; then
+        local key="${line%%=*}"
+        local val="${line#*=}"
+        # Don't override env vars that are already set
+        if [ -z "${!key+x}" ]; then
+          export "$key=$val"
+        fi
+      fi
+    done < "$cfg"
+  done
+}
+_load_env
+
 # Resolve the directory where this script lives (for finding prompts/)
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROMPTS_DIR="${AGENT_SAFE_PROMPTS_DIR:-${SCRIPT_DIR}/prompts}"
@@ -86,6 +117,10 @@ Environment:
                                     AGENT_SAFE_AI_CMD='my-ai-cli --model x {{PROMPT}}'
   OPENAI_API_KEY                    Required for --provider openai
   GEMINI_API_KEY                    Required for --provider gemini
+
+Config files (loaded in order, env vars take precedence):
+  .agent-safe.env                   Project-local config (in current directory)
+  ~/.agent-safe/.env                Global user config
 EOF
 }
 
