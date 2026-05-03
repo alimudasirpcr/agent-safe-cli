@@ -125,12 +125,17 @@ agent-safe skill remove webapp-testing
 `skill suggest` reads your project's README, fetches the available skills catalog, and asks your configured AI provider which skills would be useful:
 
 ```bash
-# Interactive — shows suggestions, lets you pick
+# Interactive — shows suggestions, lets you pick (e.g., "1 3 16" for multiple)
 agent-safe skill suggest
 
 # Auto-install all suggestions without prompting
 agent-safe skill suggest --yes
+
+# Re-fetch catalog from GitHub (ignore cached version)
+agent-safe skill suggest --force
 ```
+
+The catalog is cached locally in `skills/.catalog` so subsequent runs are instant. Use `--force` to refresh it. You can select multiple skills by number (e.g., `1 3 16`) or type `all` to install everything.
 
 If no README is found, it shows the full catalog for manual selection. Uses the configured `--provider` (default: claude).
 

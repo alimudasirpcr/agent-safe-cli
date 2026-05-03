@@ -68,6 +68,7 @@ WRITE_MODE=false
 MULTI_DOMAIN=""
 SKILL_NAMES=""
 SUGGEST_YES=false
+FORCE_REFRESH=false
 PROVIDER="${AGENT_SAFE_PROVIDER:-claude}"
 AI_MODEL="${AGENT_SAFE_MODEL:-}"
 
@@ -111,6 +112,7 @@ Commands:
        --branch BRANCH             Specify branch (default: main)
   skill suggest                      AI-powered skill suggestions based on your README
        --yes                       Auto-install all suggestions without prompting
+       --force                      Re-fetch catalog from GitHub (ignore cache)
   skill list                        List installed skills
   skill remove <name>               Uninstall a skill
 
@@ -2818,8 +2820,9 @@ cmd_skill_remove() {
 }
 
 cmd_skill_suggest() {
-  # --yes/-y flag is parsed in pre-pass and sets SUGGEST_YES=true
+  # --yes/-y and --force/-f flags are parsed in pre-pass
   local yes_mode="${SUGGEST_YES:-false}"
+  local force_refresh="${FORCE_REFRESH:-false}"
 
   preflight true false
 
@@ -2836,49 +2839,62 @@ cmd_skill_suggest() {
     log_warn "No README found in project root. Showing full catalog for manual selection."
   fi
 
-  # Fetch skills catalog from GitHub
-  log "Fetching skills catalog..."
-  local catalog_response
-  catalog_response=$(curl -sL "https://api.github.com/repos/anthropics/skills/contents/skills?ref=main" 2>/dev/null)
-
-  if ! echo "$catalog_response" | jq -e '.[]' &>/dev/null; then
-    log_error "Failed to fetch skills catalog from GitHub. Check your internet connection."
-    exit 1
-  fi
-
-  # Parse skill names and descriptions
-  local catalog_entries
-  catalog_entries=$(echo "$catalog_response" | jq -r '.[] | select(.type == "dir") | "\(.name)"' 2>/dev/null | tr -d '\r')
-
-  if [ -z "$catalog_entries" ]; then
-    log_error "No skills found in the repository."
-    exit 1
-  fi
-
-  # Fetch description for each skill (from SKILL.md frontmatter)
+  # Use cached catalog if available, unless --force
+  local catalog_cache="${SKILLS_DIR}/.catalog"
   local skill_catalog=""
-  local count=0
-  while IFS= read -r skill_name; do
-    [ -z "$skill_name" ] && continue
-    count=$((count + 1))
 
-    # Try to get description from local skill first, then from GitHub
-    local desc=""
-    if [ -f "${SKILLS_DIR}/${skill_name}/SKILL.md" ]; then
-      desc=$(parse_skill_frontmatter "${SKILLS_DIR}/${skill_name}" | grep '^description=' | head -1 | cut -d= -f2-)
+  if [ "$force_refresh" = false ] && [ -f "$catalog_cache" ] && [ "$(wc -l < "$catalog_cache" 2>/dev/null | xargs)" -gt 0 ]; then
+    log "Using cached skills catalog (${catalog_cache})"
+    skill_catalog=$(cat "$catalog_cache")
+  else
+    # Fetch skills catalog from GitHub
+    log "Fetching skills catalog from GitHub..."
+    local catalog_response
+    catalog_response=$(curl -sL "https://api.github.com/repos/anthropics/skills/contents/skills?ref=main" 2>/dev/null)
+
+    if ! echo "$catalog_response" | jq -e '.[]' &>/dev/null; then
+      log_error "Failed to fetch skills catalog from GitHub. Check your internet connection."
+      exit 1
     fi
 
-    if [ -z "$desc" ]; then
-      # Fetch from GitHub
-      local skill_md
-      skill_md=$(curl -sL "https://raw.githubusercontent.com/anthropics/skills/main/skills/${skill_name}/SKILL.md" 2>/dev/null | head -20)
-      desc=$(echo "$skill_md" | sed -n '/^---$/,/^---$/p' | sed '1d;$d' | grep '^description:' | head -1 | sed 's/^description:[[:space:]]*//' | sed "s/^['\"]//;s/['\"]$//" | tr -d '\r')
+    # Parse skill names
+    local catalog_entries
+    catalog_entries=$(echo "$catalog_response" | jq -r '.[] | select(.type == "dir") | "\(.name)"' 2>/dev/null | tr -d '\r')
+
+    if [ -z "$catalog_entries" ]; then
+      log_error "No skills found in the repository."
+      exit 1
     fi
 
-    [ -z "$desc" ] && desc="(no description available)"
-    skill_catalog="${skill_catalog}${count}. ${skill_name} - ${desc}
+    # Fetch description for each skill (from local or GitHub)
+    local count=0
+    while IFS= read -r skill_name; do
+      [ -z "$skill_name" ] && continue
+      count=$((count + 1))
+
+      local desc=""
+      # Try local skill first
+      if [ -f "${SKILLS_DIR}/${skill_name}/SKILL.md" ]; then
+        desc=$(parse_skill_frontmatter "${SKILLS_DIR}/${skill_name}" | grep '^description=' | head -1 | cut -d= -f2-)
+      fi
+
+      # Fall back to GitHub
+      if [ -z "$desc" ]; then
+        local skill_md
+        skill_md=$(curl -sL "https://raw.githubusercontent.com/anthropics/skills/main/skills/${skill_name}/SKILL.md" 2>/dev/null | head -20)
+        desc=$(echo "$skill_md" | sed -n '/^---$/,/^---$/p' | sed '1d;$d' | grep '^description:' | head -1 | sed 's/^description:[[:space:]]*//' | sed "s/^['\"]//;s/['\"]$//" | tr -d '\r')
+      fi
+
+      [ -z "$desc" ] && desc="(no description available)"
+      skill_catalog="${skill_catalog}${count}. ${skill_name} - ${desc}
 "
-  done <<< "$catalog_entries"
+    done <<< "$catalog_entries"
+
+    # Cache the catalog
+    mkdir -p "$SKILLS_DIR"
+    printf '%s\n' "$skill_catalog" > "$catalog_cache"
+    log "Catalog cached to ${catalog_cache}"
+  fi
 
   # If no README, show full catalog for manual selection
   local sug_names=()
@@ -2900,7 +2916,8 @@ cmd_skill_suggest() {
     if [ "$yes_mode" = true ]; then
       selection="all"
     else
-      echo -n "Enter skill numbers to install (e.g., 1 3 5), or 'all': "
+      echo -e "Enter skill numbers to install (e.g., ${BOLD}1 3 16${NC} for multiple, or ${BOLD}all${NC}): "
+      echo -n "Selection: "
       read -r selection
     fi
     if [ -z "$selection" ]; then
@@ -2984,7 +3001,8 @@ PROMPT_EOF
     if [ "$yes_mode" = true ]; then
       selection="all"
     else
-      echo -n "Select skills to install (e.g., 1 2 3, or 'all'): "
+      echo -e "Select skills to install (e.g., ${BOLD}1 2 3${NC} for multiple, or ${BOLD}all${NC}): "
+      echo -n "Selection: "
       read -r selection
     fi
   fi
@@ -3085,6 +3103,7 @@ for arg in "${PREPASS_ARGS[@]}"; do
   case "$arg" in
     --write) WRITE_MODE=true ;;
     --yes|-y) SUGGEST_YES=true ;;
+    --force|-f) FORCE_REFRESH=true ;;
     *) REMAINING+=("$arg") ;;
   esac
 done
