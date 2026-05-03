@@ -85,10 +85,74 @@ my-project/
 | `recover` | Recover context after a lost session | No (prints prompt) |
 | `end` | Close a session, update progress files | No (prints prompt) |
 | `end-progress` | Update MASTER-PROGRESS.md for domain handoff | No (prints prompt) |
+| `skill add` | Install a skill from the registry or GitHub | Yes (downloads) |
+| `skill suggest` | AI-powered skill suggestions based on README | Yes (AI + downloads) |
+| `skill list` | List installed skills | No |
+| `skill remove` | Uninstall a skill | No |
 | `review checklist` | Generate a code review checklist | No (prints prompt) |
 | `review diff` | Explain git diff in plain English | No (prints prompt) |
 | `review feedback` | Address reviewer blockers only | No (prints prompt) |
 | `review summary` | Generate pre-review summary | No (prints prompt) |
+
+---
+
+## Skills
+
+Skills augment session prompts with specialized instructions (e.g., webapp testing, code review patterns). They are installed from the [Anthropic Skills](https://github.com/anthropics/skills) registry or any GitHub repository.
+
+### Install a skill
+
+```bash
+# From the official registry (short name)
+agent-safe skill add webapp-testing
+
+# From an officialskills.sh URL
+agent-safe skill add https://officialskills.sh/anthropics/skills/webapp-testing
+
+# From a GitHub repo (requires --skill)
+agent-safe skill add https://github.com/anthropics/skills --skill webapp-testing
+```
+
+### List and remove skills
+
+```bash
+agent-safe skill list
+agent-safe skill remove webapp-testing
+```
+
+### Suggest skills with AI
+
+`skill suggest` reads your project's README, fetches the available skills catalog, and asks your configured AI provider which skills would be useful:
+
+```bash
+# Interactive — shows suggestions, lets you pick
+agent-safe skill suggest
+
+# Auto-install all suggestions without prompting
+agent-safe skill suggest --yes
+```
+
+If no README is found, it shows the full catalog for manual selection. Uses the configured `--provider` (default: claude).
+
+### Use skills in a session
+
+Pass `--skill` when starting or continuing a session. You can specify multiple skills with commas or repeated flags:
+
+```bash
+agent-safe start domain file "task" --skill webapp-testing
+agent-safe start domain file "task" --skill webapp-testing,another-skill
+agent-safe continue --skill webapp-testing
+```
+
+Skill content is appended to the assembled prompt, giving the AI agent additional instructions for the session.
+
+### Skill storage
+
+Skills are stored in `skills/` next to `prompts/`. Override the location with `AGENT_SAFE_SKILLS_DIR`:
+
+```bash
+AGENT_SAFE_SKILLS_DIR=/path/to/skills agent-safe skill add webapp-testing
+```
 
 ---
 
@@ -103,6 +167,7 @@ These can be placed before or after the subcommand.
 | `--max-turns N` | Max turns per Claude call (default: 40) |
 | `--write` | Write mode for `tag` — inserts tags into source files |
 | `--multi-domain [D1,D2,...]` | Multi-domain mode for `start` — open access across listed domains |
+| `--skill NAMES` | Comma-separated skill names to inject into session prompts |
 | `-h, --help` | Show help |
 | `-v, --version` | Show version |
 
@@ -172,6 +237,7 @@ Project-local `.agent-safe.env` takes precedence over global `~/.agent-safe/.env
 | `AGENT_SAFE_AI_CMD` | Custom AI command (only with `--provider custom`) |
 | `AGENT_SAFE_MAX_TURNS` | Max turns per Claude call (default: 40) |
 | `AGENT_SAFE_PROMPTS_DIR` | Override default `prompts/` directory for templates |
+| `AGENT_SAFE_SKILLS_DIR` | Override default `skills/` directory for installed skills |
 | `OPENAI_API_KEY` | Required for `--provider openai` |
 | `GEMINI_API_KEY` | Required for `--provider gemini` |
 
@@ -490,10 +556,10 @@ All prompts are editable markdown files in `.agent-safe-cli/prompts/`. They use 
 | `adopt-phase2.md` | `adopt` (generation) | `{{INFERRED}}` |
 | `tag.md` | `tag` | `{{FILE_LIST}}` |
 | `post-checklist.md` | `verify` | (none) |
-| `start.md` | `start` (single domain) | `{{DOMAIN}}`, `{{FILE}}`, `{{TASK}}`, `{{FROZEN}}`, `{{PARTIAL}}`, `{{FULLSCOPE}}`, `{{RULES_FILE}}`, `{{GIT_STATE}}` |
-| `start-multi.md` | `start` (multi-domain) | `{{DOMAINS}}`, `{{FILE}}`, `{{TASK}}`, `{{FROZEN}}`, `{{FROZEN_DOMAINS}}`, `{{RULES_FILE}}`, `{{GIT_STATE}}` |
-| `cont-session.md` | `continue` | `{{DOMAIN}}`, `{{RULES_FILE}}` |
-| `cont-recovery.md` | `recover` | `{{DOMAIN}}`, `{{FILE}}`, `{{RULES_FILE}}` |
+| `start.md` | `start` (single domain) | `{{DOMAIN}}`, `{{FILE}}`, `{{TASK}}`, `{{FROZEN}}`, `{{PARTIAL}}`, `{{FULLSCOPE}}`, `{{RULES_FILE}}`, `{{SCOPE_FILE}}`, `{{GIT_STATE}}`, `{{PROJECT_STRUCTURE}}` |
+| `start-multi.md` | `start` (multi-domain) | `{{DOMAINS}}`, `{{FILE}}`, `{{TASK}}`, `{{FROZEN}}`, `{{FROZEN_DOMAINS}}`, `{{RULES_FILE}}`, `{{SCOPE_FILES}}`, `{{GIT_STATE}}`, `{{PROJECT_STRUCTURE}}` |
+| `cont-session.md` | `continue` | `{{DOMAIN}}`, `{{RULES_FILE}}`, `{{SCOPE_FILE}}`, `{{PROJECT_STRUCTURE}}` |
+| `cont-recovery.md` | `recover` | `{{DOMAIN}}`, `{{FILE}}`, `{{RULES_FILE}}`, `{{SCOPE_FILE}}`, `{{PROJECT_STRUCTURE}}` |
 | `end-session.md` | `end` | `{{DOMAIN}}`, `{{DATE}}` |
 | `end-master-progress.md` | `end-progress` | `{{COMPLETED_DOMAIN}}`, `{{NEXT_DOMAIN}}`, `{{COMPLETED_DATE}}`, `{{BLOCKER_DESCRIPTION}}`, `{{BLOCKER_DATE}}` |
 | `review-checklist-gen.md` | `review checklist` | `{{DOMAIN}}`, `{{SESSION_GOAL}}`, `{{CONTRACT}}` |

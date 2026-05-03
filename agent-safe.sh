@@ -56,6 +56,7 @@ _load_env
 # Resolve the directory where this script lives (for finding prompts/)
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROMPTS_DIR="${AGENT_SAFE_PROMPTS_DIR:-${SCRIPT_DIR}/prompts}"
+SKILLS_DIR="${AGENT_SAFE_SKILLS_DIR:-${SCRIPT_DIR}/skills}"
 
 DATE=$(date +%Y-%m-%d)
 TIMESTAMP=$(date +%H%M%S)
@@ -65,6 +66,8 @@ MODEL_FLAG=""
 MAX_TURNS=40
 WRITE_MODE=false
 MULTI_DOMAIN=""
+SKILL_NAMES=""
+SUGGEST_YES=false
 PROVIDER="${AGENT_SAFE_PROVIDER:-claude}"
 AI_MODEL="${AGENT_SAFE_MODEL:-}"
 
@@ -103,12 +106,20 @@ Commands:
   review diff [DOMAIN]             Explain git diff in plain English (RV-02)
   review feedback [DOMAIN]         Address reviewer blockers only (RV-03)
   review summary [DOMAIN] "GOAL"   Generate pre-review summary (RV-04)
+  skill add <name|url>             Install a skill from official registry or GitHub
+       --skill NAME                Specify skill name (for GitHub repo URLs)
+       --branch BRANCH             Specify branch (default: main)
+  skill suggest                      AI-powered skill suggestions based on your README
+       --yes                       Auto-install all suggestions without prompting
+  skill list                        List installed skills
+  skill remove <name>               Uninstall a skill
 
 Options:
   --provider PROVIDER              AI provider: claude, openai, gemini, ollama, custom
                                     (default: claude)
   --model MODEL                    Model name (provider-specific, e.g. gpt-4o, gemini-2.0-flash)
   --max-turns N                    Max turns per call (default: 40, Claude only)
+  --skill NAMES                    Comma-separated skill names to inject into session prompts
   -h, --help                        Show this help
   -v, --version                     Show version
 
@@ -116,6 +127,7 @@ Environment:
   AGENT_SAFE_PROVIDER               Default provider (overridden by --provider)
   AGENT_SAFE_MODEL                  Default model (overridden by --model)
   AGENT_SAFE_PROMPTS_DIR            Override prompts/ directory
+  AGENT_SAFE_SKILLS_DIR             Override skills/ directory
   AGENT_SAFE_AI_CMD                 Custom AI command (for --provider custom)
                                     {{PROMPT}} → removed, prompt piped via stdin
                                     {{PROMPT_FILE}} → replaced with temp file path
@@ -134,6 +146,87 @@ log_success() { echo -e "${DIM}$(date +%H:%M:%S)${NC} ${GREEN}[agent-safe]${NC} 
 log_warn() { echo -e "${DIM}$(date +%H:%M:%S)${NC} ${YELLOW}[agent-safe]${NC} $1"; }
 log_error() { echo -e "${DIM}$(date +%H:%M:%S)${NC} ${RED}[agent-safe]${NC} $1"; }
 log_header() { echo -e "\n${BOLD}═══ $1 ═══${NC}\n"; }
+
+# Download a file from a URL using curl (wget fallback).
+# Usage: curl_download <url> <dest_file>
+curl_download() {
+  local url="$1" dest="$2"
+  if command -v curl &>/dev/null; then
+    curl -sL -o "$dest" "$url" 2>/dev/null
+  elif command -v wget &>/dev/null; then
+    wget -q -O "$dest" "$url" 2>/dev/null
+  else
+    log_error "Neither curl nor wget found. Install one to download skills."
+    return 1
+  fi
+}
+
+# Parse YAML frontmatter from a SKILL.md file.
+# Outputs key=value lines (one per line) for each frontmatter field.
+# Usage: parse_skill_frontmatter <skill_dir>
+parse_skill_frontmatter() {
+  local skill_dir="$1"
+  local skill_file="${skill_dir}/SKILL.md"
+  if [ ! -f "$skill_file" ]; then
+    return 1
+  fi
+  sed -n '/^---$/,/^---$/p' "$skill_file" | sed '1d;$d' | \
+    while IFS= read -r line; do
+      [[ -z "${line// /}" ]] && continue
+      local key="${line%%:*}"
+      local val="${line#*:}"
+      val="${val# }"
+      val="${val#\'}"; val="${val%\'}"
+      val="${val#\"}"; val="${val%\"}"
+      printf '%s=%s\n' "$key" "$val"
+    done
+}
+
+# Inject skill content into an assembled prompt.
+# Appends each skill's SKILL.md body (after frontmatter) under a heading.
+# Usage: inject_skills <prompt> <comma_separated_skill_names>
+inject_skills() {
+  local prompt="$1"
+  local skill_names="$2"
+  local skill_content=""
+
+  IFS=',' read -ra skills <<< "$skill_names"
+  for skill_name in "${skills[@]}"; do
+    local skill_dir="${SKILLS_DIR}/${skill_name}"
+    if [ ! -d "$skill_dir" ]; then
+      log_error "Skill '${skill_name}' not found. Install it with: agent-safe skill add ${skill_name}"
+      exit 1
+    fi
+    if [ ! -f "${skill_dir}/SKILL.md" ]; then
+      log_error "Skill '${skill_name}' is missing SKILL.md"
+      exit 1
+    fi
+
+    local meta skill_title skill_desc
+    meta=$(parse_skill_frontmatter "$skill_dir")
+    skill_title=$(echo "$meta" | grep '^name=' | head -1 | cut -d= -f2-)
+    skill_desc=$(echo "$meta" | grep '^description=' | head -1 | cut -d= -f2-)
+    [ -z "$skill_title" ] && skill_title="$skill_name"
+
+    local body
+    body=$(awk 'found{print} /^---$/{c++; if(c==2) found=1}' "${skill_dir}/SKILL.md")
+
+    skill_content+="
+---
+
+## Skill: ${skill_title}
+${skill_desc:+_ ${skill_desc} _}
+
+${body}
+"
+  done
+
+  if [ -n "$skill_content" ]; then
+    printf '%s\n%s\n' "$prompt" "$skill_content"
+  else
+    printf '%s\n' "$prompt"
+  fi
+}
 
 handle_interrupt() {
   if [ -n "$CHILD_PID" ] && kill -0 "$CHILD_PID" 2>/dev/null; then
@@ -792,7 +885,9 @@ cmd_adopt() {
   local file_list
   file_list=$(find . -type f \
     \( -name "*.js" -o -name "*.ts" -o -name "*.jsx" -o -name "*.tsx" \
-       -o -name "*.py" -o -name "*.go" -o -name "*.rb" -o -name "*.rs" \) \
+       -o -name "*.py" -o -name "*.go" -o -name "*.rb" -o -name "*.rs" \
+       -o -name "*.php" -o -name "*.html" -o -name "*.css" -o -name "*.vue" \
+       -o -name "*.svelte" \) \
     -not -path "*/node_modules/*" \
     -not -path "*/.git/*" \
     -not -path "*/dist/*" \
@@ -925,7 +1020,9 @@ cmd_tag() {
   local file_list
   file_list=$(find . -type f \
     \( -name "*.js" -o -name "*.ts" -o -name "*.jsx" -o -name "*.tsx" \
-       -o -name "*.py" -o -name "*.go" -o -name "*.rb" \) \
+       -o -name "*.py" -o -name "*.go" -o -name "*.rb" \
+       -o -name "*.php" -o -name "*.html" -o -name "*.css" -o -name "*.vue" \
+       -o -name "*.svelte" \) \
     -not -path "*/node_modules/*" \
     -not -path "*/.git/*" \
     -not -path "*/_agent/*" \
@@ -1134,6 +1231,8 @@ cmd_verify() {
   local n_tags
   n_tags=$(grep -r "@agent:" --include="*.js" --include="*.ts" --include="*.jsx" \
     --include="*.tsx" --include="*.py" --include="*.go" --include="*.rb" \
+    --include="*.php" --include="*.html" --include="*.css" --include="*.vue" \
+    --include="*.svelte" \
     --exclude-dir=node_modules --exclude-dir=_agent --exclude-dir=.git . 2>/dev/null \
     | wc -l | xargs)
   if [ "$n_tags" -gt 0 ]; then
@@ -1266,7 +1365,7 @@ cmd_start() {
     if [ -f "$scope_file" ]; then
       file=$(grep -E '^\|.*\|' "$scope_file" 2>/dev/null \
         | grep -vE 'File|---|READ|config|Config' \
-        | grep -E '\.(ts|js|py|go|rb|jsx|tsx)$' \
+        | grep -E '\.(ts|js|py|go|rb|jsx|tsx|php|html|css|vue|svelte)$' \
         | head -1 \
         | awk -F'|' '{gsub(/^[ \t]+|[ \t]+$/, "", $2); print $2}' | xargs || echo "")
       if [ -z "$file" ]; then
@@ -1277,7 +1376,8 @@ cmd_start() {
       fi
     fi
     if [ -z "$file" ]; then
-      file=$(find . -type f \( -name "*.ts" -o -name "*.js" -o -name "*.py" \) \
+      file=$(find . -type f \( -name "*.ts" -o -name "*.js" -o -name "*.py" \
+        -o -name "*.php" -o -name "*.html" -o -name "*.css" -o -name "*.vue" -o -name "*.svelte" \) \
         -not -path "*/node_modules/*" -not -path "*/_agent/*" -not -path "*/.git/*" \
         -not -name "*.config.*" -not -name "*.test.*" \
         2>/dev/null | head -1 | sed 's|^\./||')
@@ -1340,6 +1440,8 @@ cmd_start() {
     local all_tags
     all_tags=$(grep -rn "@agent:" --include="*.js" --include="*.ts" --include="*.jsx" \
       --include="*.tsx" --include="*.py" --include="*.go" --include="*.rb" \
+      --include="*.php" --include="*.html" --include="*.css" --include="*.vue" \
+      --include="*.svelte" \
       --exclude-dir=node_modules --exclude-dir=_agent --exclude-dir=.git . 2>/dev/null || echo "")
     if [ -n "$all_tags" ]; then
       local frozen_names="" partial_names="" fullscope_names=""
@@ -1376,6 +1478,32 @@ cmd_start() {
   [ -z "$partial" ] && partial="(none)"
   [ -z "$fullscope" ] && fullscope="(none yet)"
 
+  # Build project directory tree (excludes common noise dirs)
+  local project_structure
+  project_structure=$(find . -type f \
+    -not -path "*/node_modules/*" \
+    -not -path "*/.git/*" \
+    -not -path "*/_agent/*" \
+    -not -path "*/dist/*" \
+    -not -path "*/build/*" \
+    -not -path "*/__pycache__/*" \
+    -not -path "*/.next/*" \
+    -not -path "*/target/*" \
+    -not -path "*/vendor/*" \
+    -not -path "*/.agent-safe-cli/*" \
+    -not -name "*.lock" \
+    -not -name "package-lock.json" \
+    -not -name "yarn.lock" \
+    -not -name "pnpm-lock.yaml" \
+    2>/dev/null \
+    | sort \
+    | sed 's|^\./||' \
+    | head -100)
+  [ -z "$project_structure" ] && project_structure="(no files found)"
+
+  # Scope file path for cross-domain context
+  local scope_file="_agent/${domain}/SCOPE.md"
+
   # Build the prompt once
   local prompt
   prompt=$(load_prompt start \
@@ -1386,7 +1514,13 @@ cmd_start() {
     "PARTIAL=${partial}" \
     "FULLSCOPE=${fullscope}" \
     "RULES_FILE=${rules_file}" \
-    "GIT_STATE=${git_state}")
+    "SCOPE_FILE=${scope_file}" \
+    "GIT_STATE=${git_state}" \
+    "PROJECT_STRUCTURE=${project_structure}")
+
+  if [ -n "${SKILL_NAMES:-}" ]; then
+    prompt=$(inject_skills "$prompt" "$SKILL_NAMES")
+  fi
 
   echo ""
   echo -e "${BOLD}═══ Session prompt — paste this into Claude ═══${NC}"
@@ -1533,6 +1667,19 @@ cmd_start_multi_domain() {
     fi
   done
 
+  # Collect scope files from all in-scope domains
+  local all_scopes=""
+  for d in "${md_domains[@]}"; do
+    local sf="_agent/${d}/SCOPE.md"
+    if [ -f "$sf" ]; then
+      if [ -n "$all_scopes" ]; then
+        all_scopes="${all_scopes}, ${sf}"
+      else
+        all_scopes="$sf"
+      fi
+    fi
+  done
+
   # Collect FROZEN function names from frozen domains
   local frozen_funcs=""
   local fd
@@ -1611,6 +1758,29 @@ cmd_start_multi_domain() {
     fi
   fi
 
+  # Build project directory tree (excludes common noise dirs)
+  local project_structure
+  project_structure=$(find . -type f \
+    -not -path "*/node_modules/*" \
+    -not -path "*/.git/*" \
+    -not -path "*/_agent/*" \
+    -not -path "*/dist/*" \
+    -not -path "*/build/*" \
+    -not -path "*/__pycache__/*" \
+    -not -path "*/.next/*" \
+    -not -path "*/target/*" \
+    -not -path "*/vendor/*" \
+    -not -path "*/.agent-safe-cli/*" \
+    -not -name "*.lock" \
+    -not -name "package-lock.json" \
+    -not -name "yarn.lock" \
+    -not -name "pnpm-lock.yaml" \
+    2>/dev/null \
+    | sort \
+    | sed 's|^\./||' \
+    | head -100)
+  [ -z "$project_structure" ] && project_structure="(no files found)"
+
   local primary_domain="${md_domains[0]}"
 
   # Build the prompt once
@@ -1622,7 +1792,13 @@ cmd_start_multi_domain() {
     "FROZEN=${frozen_funcs}" \
     "FROZEN_DOMAINS=${frozen_domains_str}" \
     "RULES_FILE=${all_rules}" \
-    "GIT_STATE=${git_state}")
+    "SCOPE_FILES=${all_scopes}" \
+    "GIT_STATE=${git_state}" \
+    "PROJECT_STRUCTURE=${project_structure}")
+
+  if [ -n "${SKILL_NAMES:-}" ]; then
+    prompt=$(inject_skills "$prompt" "$SKILL_NAMES")
+  fi
 
   echo ""
   echo -e "${BOLD}═══ Multi-domain session prompt ═══${NC}"
@@ -1658,7 +1834,9 @@ cmd_start_print_only() {
     "PARTIAL=$5" \
     "FULLSCOPE=$6" \
     "RULES_FILE=$7" \
-    "GIT_STATE=$8"
+    "SCOPE_FILE=$8" \
+    "GIT_STATE=$9" \
+    "PROJECT_STRUCTURE=${10}"
 }
 
 # ============================================================================
@@ -1717,7 +1895,7 @@ cmd_continue() {
       if [ -z "$file" ]; then
         file=$(grep -E '^\|.*\|' "$scope_file" 2>/dev/null \
           | grep -vE 'File|---|READ|config|Config' \
-          | grep -E '\.(ts|js|py|go|rb|jsx|tsx)$' \
+          | grep -E '\.(ts|js|py|go|rb|jsx|tsx|php|html|css|vue|svelte)$' \
           | head -1 \
           | awk -F'|' '{gsub(/^[ \t]+|[ \t]+$/, "", $2); print $2}' | xargs || echo "")
       fi
@@ -1733,11 +1911,41 @@ cmd_continue() {
     exit 1
   fi
 
+  local scope_file="_agent/${domain}/SCOPE.md"
+
+  # Build project directory tree
+  local project_structure
+  project_structure=$(find . -type f \
+    -not -path "*/node_modules/*" \
+    -not -path "*/.git/*" \
+    -not -path "*/_agent/*" \
+    -not -path "*/dist/*" \
+    -not -path "*/build/*" \
+    -not -path "*/__pycache__/*" \
+    -not -path "*/.next/*" \
+    -not -path "*/target/*" \
+    -not -path "*/vendor/*" \
+    -not -path "*/.agent-safe-cli/*" \
+    -not -name "*.lock" \
+    -not -name "package-lock.json" \
+    -not -name "yarn.lock" \
+    -not -name "pnpm-lock.yaml" \
+    2>/dev/null \
+    | sort \
+    | sed 's|^\./||' \
+    | head -100)
+  [ -z "$project_structure" ] && project_structure="(no files found)"
+
   echo ""
   echo -e "${BOLD}═══ Continue session prompt ═══${NC}"
   echo ""
   local prompt
-  prompt=$(load_prompt cont-session "DOMAIN=${domain}" "RULES_FILE=${rules_file}")
+  prompt=$(load_prompt cont-session "DOMAIN=${domain}" "RULES_FILE=${rules_file}" "SCOPE_FILE=${scope_file}" "PROJECT_STRUCTURE=${project_structure}")
+
+  if [ -n "${SKILL_NAMES:-}" ]; then
+    prompt=$(inject_skills "$prompt" "$SKILL_NAMES")
+  fi
+
   echo "$prompt"
   echo ""
   echo -e "${BOLD}═══════════════════════════════════════════════${NC}"
@@ -1815,7 +2023,7 @@ cmd_recover() {
       if [ -z "$file" ]; then
         file=$(grep -E '^\|.*\|' "$scope_file" 2>/dev/null \
           | grep -vE 'File|---|READ|config|Config' \
-          | grep -E '\.(ts|js|py|go|rb|jsx|tsx)$' \
+          | grep -E '\.(ts|js|py|go|rb|jsx|tsx|php|html|css|vue|svelte)$' \
           | head -1 \
           | awk -F'|' '{gsub(/^[ \t]+|[ \t]+$/, "", $2); print $2}' | xargs || echo "")
       fi
@@ -1826,12 +2034,41 @@ cmd_recover() {
   fi
 
   local rules_file="_agent/${domain}/INSTRUCTIONS.summary.md"
+  local scope_file="_agent/${domain}/SCOPE.md"
+
+  # Build project directory tree
+  local project_structure
+  project_structure=$(find . -type f \
+    -not -path "*/node_modules/*" \
+    -not -path "*/.git/*" \
+    -not -path "*/_agent/*" \
+    -not -path "*/dist/*" \
+    -not -path "*/build/*" \
+    -not -path "*/__pycache__/*" \
+    -not -path "*/.next/*" \
+    -not -path "*/target/*" \
+    -not -path "*/vendor/*" \
+    -not -path "*/.agent-safe-cli/*" \
+    -not -name "*.lock" \
+    -not -name "package-lock.json" \
+    -not -name "yarn.lock" \
+    -not -name "pnpm-lock.yaml" \
+    2>/dev/null \
+    | sort \
+    | sed 's|^\./||' \
+    | head -100)
+  [ -z "$project_structure" ] && project_structure="(no files found)"
 
   echo ""
   echo -e "${BOLD}═══ Recovery prompt ═══${NC}"
   echo ""
   local prompt
-  prompt=$(load_prompt cont-recovery "DOMAIN=${domain}" "FILE=${file:-.}" "RULES_FILE=${rules_file}")
+  prompt=$(load_prompt cont-recovery "DOMAIN=${domain}" "FILE=${file:-.}" "RULES_FILE=${rules_file}" "SCOPE_FILE=${scope_file}" "PROJECT_STRUCTURE=${project_structure}")
+
+  if [ -n "${SKILL_NAMES:-}" ]; then
+    prompt=$(inject_skills "$prompt" "$SKILL_NAMES")
+  fi
+
   echo "$prompt"
   echo ""
   echo -e "${BOLD}═══════════════════════════════════════════════${NC}"
@@ -2329,6 +2566,476 @@ cmd_review_summary() {
 }
 
 # ============================================================================
+# Skill management commands
+# ============================================================================
+
+# Download all files in a GitHub directory recursively.
+# Usage: download_skill_subdir <org> <repo> <branch> <path> <local_dest>
+download_skill_subdir() {
+  local org="$1" repo="$2" branch="$3" path="$4" local_dest="$5"
+  local api_url="https://api.github.com/repos/${org}/${repo}/contents/${path}?ref=${branch}"
+  local response
+  response=$(curl -sL "$api_url" 2>/dev/null)
+
+  if ! echo "$response" | jq -e '.[]' &>/dev/null; then
+    return 0
+  fi
+
+  mkdir -p "$local_dest"
+
+  # Use temp file to avoid subshell issues with piped while-read
+  local tmp_entries
+  tmp_entries=$(mktemp)
+  echo "$response" | jq -r '.[] | "\(.type) \(.name) \(.download_url // "")"' 2>/dev/null | tr -d '\r' > "$tmp_entries"
+
+  while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    local etype="${line%% *}"
+    local rest="${line#* }"
+    local ename="${rest%% *}"
+    local eurl="${rest#* }"
+    eurl="${eurl# }"
+
+    case "$etype" in
+      file)
+        if [ -n "$eurl" ] && [ "$eurl" != "null" ]; then
+          log "  Downloading ${ename}..."
+          curl_download "$eurl" "${local_dest}/${ename}"
+        fi
+        ;;
+      dir)
+        local sub_path="${path}/${ename}"
+        download_skill_subdir "$org" "$repo" "$branch" "$sub_path" "${local_dest}/${ename}"
+        ;;
+    esac
+  done < "$tmp_entries"
+
+  rm -f "$tmp_entries"
+}
+
+# Download a skill from GitHub using the API.
+# Usage: download_skill_from_github <org> <repo> <branch> <skill_name>
+download_skill_from_github() {
+  local org="$1" repo="$2" branch="$3" skill_name="$4"
+  local dest_dir="${SKILLS_DIR}/${skill_name}"
+
+  if [ -d "$dest_dir" ]; then
+    log_warn "Skill '${skill_name}' already exists at ${dest_dir}"
+    echo -n "Overwrite? [y/N] "
+    read -r answer
+    if [[ ! "$answer" =~ ^[Yy]$ ]]; then
+      log "Aborted."
+      return 0
+    fi
+    rm -rf "$dest_dir"
+  fi
+
+  mkdir -p "$dest_dir"
+
+  local base_url="https://raw.githubusercontent.com/${org}/${repo}/${branch}/skills/${skill_name}"
+
+  log "Downloading SKILL.md for '${skill_name}'..."
+  if ! curl_download "${base_url}/SKILL.md" "${dest_dir}/SKILL.md"; then
+    log_error "Failed to download SKILL.md from ${base_url}/SKILL.md"
+    rm -rf "$dest_dir"
+    exit 1
+  fi
+
+  # Verify SKILL.md is not empty and has frontmatter
+  if [ ! -s "${dest_dir}/SKILL.md" ]; then
+    log_error "Downloaded SKILL.md is empty."
+    rm -rf "$dest_dir"
+    exit 1
+  fi
+
+  # Use GitHub API to discover additional files (scripts/, references/, assets/, examples/)
+  local api_url="https://api.github.com/repos/${org}/${repo}/contents/skills/${skill_name}?ref=${branch}"
+  local api_response
+  api_response=$(curl -sL "$api_url" 2>/dev/null)
+
+  if echo "$api_response" | jq -e '.[]' &>/dev/null; then
+    local entries
+    entries=$(echo "$api_response" | jq -r '.[] | "\(.type) \(.name) \(.download_url // "")"' 2>/dev/null | tr -d '\r')
+
+    while IFS= read -r entry; do
+      [ -z "$entry" ] && continue
+      local etype="${entry%% *}"
+      local rest="${entry#* }"
+      local ename="${rest%% *}"
+      local eurl="${rest#* }"
+      eurl="${eurl# }"
+
+      case "$etype" in
+        file)
+          [ "$ename" = "SKILL.md" ] && continue
+          if [ -n "$eurl" ] && [ "$eurl" != "null" ]; then
+            log "  Downloading ${ename}..."
+            curl_download "$eurl" "${dest_dir}/${ename}"
+          fi
+          ;;
+        dir)
+          local sub_path="skills/${skill_name}/${ename}"
+          download_skill_subdir "$org" "$repo" "$branch" "$sub_path" "${dest_dir}/${ename}"
+          ;;
+      esac
+    done <<< "$entries"
+  else
+    # API failed (rate limit, etc.) -- try common subdirectories
+    for subdir in scripts references assets examples; do
+      local sub_api="https://api.github.com/repos/${org}/${repo}/contents/skills/${skill_name}/${subdir}?ref=${branch}"
+      local sub_response
+      sub_response=$(curl -sL "$sub_api" 2>/dev/null)
+      if echo "$sub_response" | jq -e '.[]' &>/dev/null; then
+        mkdir -p "${dest_dir}/${subdir}"
+        local tmp_sub_entries
+        tmp_sub_entries=$(mktemp)
+        echo "$sub_response" | jq -r '.[] | "\(.name) \(.download_url // "")"' 2>/dev/null | tr -d '\r' > "$tmp_sub_entries"
+        while IFS= read -r line; do
+          [ -z "$line" ] && continue
+          local fname="${line%% *}"
+          local furl="${line#* }"
+          furl="${furl# }"
+          if [ -n "$furl" ] && [ "$furl" != "null" ]; then
+            log "  Downloading ${subdir}/${fname}..."
+            curl_download "$furl" "${dest_dir}/${subdir}/${fname}"
+          fi
+        done < "$tmp_sub_entries"
+        rm -f "$tmp_sub_entries"
+      fi
+    done
+  fi
+
+  # Validate frontmatter
+  local skill_meta skill_title
+  skill_meta=$(parse_skill_frontmatter "$dest_dir")
+  skill_title=$(echo "$skill_meta" | grep '^name=' | head -1 | cut -d= -f2-)
+  if [ -z "$skill_title" ]; then
+    log_warn "SKILL.md is missing 'name' in frontmatter. Using directory name: ${skill_name}"
+  fi
+
+  log_success "Skill '${skill_name}' installed to ${dest_dir}"
+}
+
+cmd_skill_add() {
+  local skill_source="" skill_name="" branch="main"
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --skill)   skill_name="$2"; shift 2 ;;
+      --branch)  branch="$2"; shift 2 ;;
+      *)         skill_source="$1"; shift ;;
+    esac
+  done
+
+  if [ -z "$skill_source" ]; then
+    log_error "Usage: agent-safe skill add <name|url> [--skill NAME] [--branch BRANCH]"
+    log_error ""
+    log_error "Examples:"
+    log_error "  agent-safe skill add webapp-testing"
+    log_error "  agent-safe skill add https://github.com/anthropics/skills --skill webapp-testing"
+    log_error "  agent-safe skill add https://officialskills.sh/anthropics/skills/webapp-testing"
+    exit 1
+  fi
+
+  if [[ "$skill_source" == https://officialskills.sh/* ]]; then
+    # Official registry URL: extract org/repo/name
+    local org_repo_path="${skill_source#https://officialskills.sh/}"
+    local org="${org_repo_path%%/*}"
+    local rest="${org_repo_path#*/}"
+    if [[ "$rest" == skills/* ]]; then
+      skill_name="${rest#skills/}"
+      skill_name="${skill_name%%/*}"
+    fi
+    download_skill_from_github "$org" "skills" "$branch" "$skill_name"
+
+  elif [[ "$skill_source" == https://github.com/* ]]; then
+    # GitHub repo URL
+    local gh_path="${skill_source#https://github.com/}"
+    local org="${gh_path%%/*}"
+    local repo="${gh_path#*/}"
+    repo="${repo%%/*}"
+
+    if [ -z "$skill_name" ]; then
+      log_error "When specifying a GitHub repo URL, use --skill to name the skill."
+      log_error "  agent-safe skill add https://github.com/anthropics/skills --skill webapp-testing"
+      exit 1
+    fi
+    download_skill_from_github "$org" "$repo" "$branch" "$skill_name"
+
+  else
+    # Bare name -- resolve as official Anthropic skill
+    skill_name="$skill_source"
+    download_skill_from_github "anthropics" "skills" "main" "$skill_name"
+  fi
+}
+
+cmd_skill_list() {
+  if [ ! -d "$SKILLS_DIR" ]; then
+    log "No skills installed. Use 'agent-safe skill add <name>' to install one."
+    return 0
+  fi
+
+  local count=0
+  for skill_dir in "$SKILLS_DIR"/*/; do
+    [ ! -d "$skill_dir" ] && continue
+    local name
+    name=$(basename "$skill_dir")
+    local meta desc=""
+    meta=$(parse_skill_frontmatter "$skill_dir" 2>/dev/null || echo "")
+    if [ -n "$meta" ]; then
+      desc=$(echo "$meta" | grep '^description=' | head -1 | cut -d= -f2-)
+    fi
+    [ -z "$desc" ] && desc="(no description)"
+    echo -e "  ${GREEN}${name}${NC}  ${DIM}${desc}${NC}"
+    count=$((count + 1))
+  done
+
+  if [ $count -eq 0 ]; then
+    log "No skills installed. Use 'agent-safe skill add <name>' to install one."
+  else
+    echo ""
+    log "${count} skill(s) installed in ${SKILLS_DIR}"
+  fi
+}
+
+cmd_skill_remove() {
+  local skill_name="${1:-}"
+
+  if [ -z "$skill_name" ]; then
+    log_error "Usage: agent-safe skill remove <name>"
+    exit 1
+  fi
+
+  local skill_dir="${SKILLS_DIR}/${skill_name}"
+  if [ ! -d "$skill_dir" ]; then
+    log_error "Skill '${skill_name}' not found in ${SKILLS_DIR}"
+    cmd_skill_list
+    exit 1
+  fi
+
+  rm -rf "$skill_dir"
+  log_success "Skill '${skill_name}' removed."
+}
+
+cmd_skill_suggest() {
+  # --yes/-y flag is parsed in pre-pass and sets SUGGEST_YES=true
+  local yes_mode="${SUGGEST_YES:-false}"
+
+  preflight true false
+
+  # Find README in project root
+  local readme_file=""
+  for candidate in README.md readme.md README.MED README README.txt; do
+    if [ -f "$candidate" ]; then
+      readme_file="$candidate"
+      break
+    fi
+  done
+
+  if [ -z "$readme_file" ]; then
+    log_warn "No README found in project root. Showing full catalog for manual selection."
+  fi
+
+  # Fetch skills catalog from GitHub
+  log "Fetching skills catalog..."
+  local catalog_response
+  catalog_response=$(curl -sL "https://api.github.com/repos/anthropics/skills/contents/skills?ref=main" 2>/dev/null)
+
+  if ! echo "$catalog_response" | jq -e '.[]' &>/dev/null; then
+    log_error "Failed to fetch skills catalog from GitHub. Check your internet connection."
+    exit 1
+  fi
+
+  # Parse skill names and descriptions
+  local catalog_entries
+  catalog_entries=$(echo "$catalog_response" | jq -r '.[] | select(.type == "dir") | "\(.name)"' 2>/dev/null | tr -d '\r')
+
+  if [ -z "$catalog_entries" ]; then
+    log_error "No skills found in the repository."
+    exit 1
+  fi
+
+  # Fetch description for each skill (from SKILL.md frontmatter)
+  local skill_catalog=""
+  local count=0
+  while IFS= read -r skill_name; do
+    [ -z "$skill_name" ] && continue
+    count=$((count + 1))
+
+    # Try to get description from local skill first, then from GitHub
+    local desc=""
+    if [ -f "${SKILLS_DIR}/${skill_name}/SKILL.md" ]; then
+      desc=$(parse_skill_frontmatter "${SKILLS_DIR}/${skill_name}" | grep '^description=' | head -1 | cut -d= -f2-)
+    fi
+
+    if [ -z "$desc" ]; then
+      # Fetch from GitHub
+      local skill_md
+      skill_md=$(curl -sL "https://raw.githubusercontent.com/anthropics/skills/main/skills/${skill_name}/SKILL.md" 2>/dev/null | head -20)
+      desc=$(echo "$skill_md" | sed -n '/^---$/,/^---$/p' | sed '1d;$d' | grep '^description:' | head -1 | sed 's/^description:[[:space:]]*//' | sed "s/^['\"]//;s/['\"]$//" | tr -d '\r')
+    fi
+
+    [ -z "$desc" ] && desc="(no description available)"
+    skill_catalog="${skill_catalog}${count}. ${skill_name} - ${desc}
+"
+  done <<< "$catalog_entries"
+
+  # If no README, show full catalog for manual selection
+  local sug_names=()
+  local total_count=0
+  while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    local sname="${line%% -*}"
+    sname="${sname#[0-9]*. }"
+    sname="$(echo "$sname" | xargs)"
+    sug_names+=("$sname")
+    total_count=$((total_count + 1))
+  done <<< "$skill_catalog"
+
+  if [ -z "$readme_file" ]; then
+    echo ""
+    log_header "Available Skills"
+    echo "$skill_catalog"
+    echo ""
+    if [ "$yes_mode" = true ]; then
+      selection="all"
+    else
+      echo -n "Enter skill numbers to install (e.g., 1 3 5), or 'all': "
+      read -r selection
+    fi
+    if [ -z "$selection" ]; then
+      log "No selection made."
+      return 0
+    fi
+  else
+    # Build AI prompt
+    local readme_content
+    readme_content=$(cat "$readme_file")
+
+    local prompt
+    prompt=$(cat <<PROMPT_EOF
+You are analyzing a project to recommend relevant Anthropic skills. Based on the project description and available skills, suggest which skills would be most useful.
+
+Available skills:
+${skill_catalog}
+Project README:
+${readme_content}
+
+Respond with ONLY a comma-separated list of skill names from the list above that would be useful for this project. Consider the project's tech stack, testing needs, and development workflow. If no skills are clearly relevant, respond with "none".
+
+Example response: webapp-testing,code-review
+PROMPT_EOF
+)
+
+    local out_file="${LOG_DIR}/skill-suggest-output.log"
+    mkdir -p "$LOG_DIR"
+
+    log "Asking ${PROVIDER} to analyze your project..."
+    if ! run_ai "$prompt" "$out_file"; then
+      log_error "AI provider failed. See ${out_file}"
+      exit 1
+    fi
+
+    # Parse AI response for skill names
+    local ai_response
+    ai_response=$(cat "$out_file" | tr -d '\r' | tr '\n' ' ')
+
+    # Extract skill names: find words that match known skill names
+    local suggested=""
+    while IFS= read -r skill_name; do
+      [ -z "$skill_name" ] && continue
+      # Check if this skill name appears in the AI response (case-insensitive)
+      if echo "$ai_response" | grep -qi "$skill_name"; then
+        if [ -z "$suggested" ]; then
+          suggested="$skill_name"
+        else
+          suggested="${suggested} ${skill_name}"
+        fi
+      fi
+    done <<< "$catalog_entries"
+
+    if [ -z "$suggested" ]; then
+      log "No skills suggested for this project."
+      return 0
+    fi
+
+    # Display suggestions
+    echo ""
+    log_header "Suggested Skills"
+
+    local sug_count=0
+    sug_names=()
+    for sname in $suggested; do
+      sug_count=$((sug_count + 1))
+      sug_names+=("$sname")
+      # Get description
+      local sdesc=""
+      if [ -f "${SKILLS_DIR}/${sname}/SKILL.md" ]; then
+        sdesc=$(parse_skill_frontmatter "${SKILLS_DIR}/${sname}" | grep '^description=' | head -1 | cut -d= -f2-)
+      else
+        sdesc=$(echo "$skill_catalog" | grep "^${sug_count}\. ${sname} - " | sed "s/^[0-9]*\. ${sname} - //" | head -1)
+      fi
+      [ -z "$sdesc" ] && sdesc="(no description)"
+      echo -e "  ${GREEN}${sug_count}.${NC} ${BOLD}${sname}${NC}  ${DIM}${sdesc}${NC}"
+    done
+
+    echo ""
+
+    if [ "$yes_mode" = true ]; then
+      selection="all"
+    else
+      echo -n "Select skills to install (e.g., 1 2 3, or 'all'): "
+      read -r selection
+    fi
+  fi
+
+  # Process selection
+  local skills_to_install=()
+  if [ "$selection" = "all" ]; then
+    for sname in "${sug_names[@]}"; do
+      skills_to_install+=("$sname")
+    done
+  else
+    # Parse number selection
+    for num in $selection; do
+      if [[ "$num" =~ ^[0-9]+$ ]] && [ "$num" -ge 1 ] && [ "$num" -le "${#sug_names[@]}" ]; then
+        skills_to_install+=("${sug_names[$((num-1))]}")
+      fi
+    done
+  fi
+
+  if [ ${#skills_to_install[@]} -eq 0 ]; then
+    log "No skills selected."
+    return 0
+  fi
+
+  # Install selected skills
+  for sname in "${skills_to_install[@]}"; do
+    if [ -d "${SKILLS_DIR}/${sname}" ]; then
+      log_warn "Skill '${sname}' already installed. Skipping."
+    else
+      log "Installing '${sname}'..."
+      download_skill_from_github "anthropics" "skills" "main" "$sname"
+    fi
+  done
+}
+
+cmd_skill() {
+  local skill_subcmd="${1:-}"
+  shift || true
+
+  case "$skill_subcmd" in
+    add)        cmd_skill_add "$@" ;;
+    list|ls)    cmd_skill_list "$@" ;;
+    remove|rm)  cmd_skill_remove "$@" ;;
+    suggest)    cmd_skill_suggest "$@" ;;
+    *)          log_error "Unknown skill subcommand: ${skill_subcmd:-none}"
+                log_error "Usage: agent-safe skill <add|list|remove|suggest>"
+                exit 1 ;;
+  esac
+}
+
+# ============================================================================
 # Argument parsing
 # ============================================================================
 
@@ -2348,11 +3055,19 @@ while [ $# -gt 0 ]; do
     --multi-domain)
       # Next arg is a domain list only if it contains a comma or is "all".
       # Known subcommands (init, adopt, tag, verify, start) are NOT domain lists.
-      if [ $# -gt 1 ] && [[ "$2" != -* ]] && [[ "$2" != @(init|adopt|tag|verify|start|continue|recover|end|end-progress|review) ]]; then
+      if [ $# -gt 1 ] && [[ "$2" != -* ]] && [[ "$2" != @(init|adopt|tag|verify|start|continue|recover|end|end-progress|review|skill) ]]; then
         MULTI_DOMAIN="$2"; shift 2
       else
         MULTI_DOMAIN="all"; shift
       fi
+      ;;
+    --skill)
+      if [ -z "${SKILL_NAMES:-}" ]; then
+        SKILL_NAMES="$2"
+      else
+        SKILL_NAMES="${SKILL_NAMES},$2"
+      fi
+      shift 2
       ;;
     -h|--help) show_help; exit 0 ;;
     -v|--version) echo "agent-safe v${VERSION}"; exit 0 ;;
@@ -2364,11 +3079,12 @@ done
 SUBCOMMAND="${PREPASS_ARGS[0]}"
 unset 'PREPASS_ARGS[0]'
 
-# Second pre-pass for command-level flags (e.g. --write, --run)
+# Second pre-pass for command-level flags (e.g. --write, --yes)
 declare -a REMAINING=()
 for arg in "${PREPASS_ARGS[@]}"; do
   case "$arg" in
     --write) WRITE_MODE=true ;;
+    --yes|-y) SUGGEST_YES=true ;;
     *) REMAINING+=("$arg") ;;
   esac
 done
@@ -2394,6 +3110,20 @@ case "$SUBCOMMAND" in
       summary)   cmd_review_summary "${REMAINING[@]+"${REMAINING[@]}"}" ;;
       *) log_error "Unknown review subcommand: ${REVIEW_SUB:-none}"
          log_error "Usage: agent-safe review <checklist|diff|feedback|summary>"
+         exit 1 ;;
+    esac
+    ;;
+  skill)
+    # skill has sub-commands: add, list, remove, suggest
+    SKILL_SUB="${REMAINING[0]:-}"
+    [ -n "$SKILL_SUB" ] && unset 'REMAINING[0]'
+    case "$SKILL_SUB" in
+      add)      cmd_skill_add "${REMAINING[@]+"${REMAINING[@]}"}" ;;
+      list|ls)  cmd_skill_list "${REMAINING[@]+"${REMAINING[@]}"}" ;;
+      remove|rm) cmd_skill_remove "${REMAINING[@]+"${REMAINING[@]}"}" ;;
+      suggest)  cmd_skill_suggest "${REMAINING[@]+"${REMAINING[@]}"}" ;;
+      *) log_error "Unknown skill subcommand: ${SKILL_SUB:-none}"
+         log_error "Usage: agent-safe skill <add|list|remove|suggest>"
          exit 1 ;;
     esac
     ;;

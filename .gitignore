@@ -1,3 +1,4 @@
 .agent-safe.env
 _agent/
 tmp/
+skills/

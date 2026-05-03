@@ -13,9 +13,16 @@ MODE: MULTI-DOMAIN — you may freely edit any file in the listed domains.
 Do NOT modify files in frozen domains or any file outside the listed domains.
 
 RULES: {{RULES_FILE}}
+SCOPE:   {{SCOPE_FILES}}
 STATE: {{GIT_STATE}}
 
+PROJECT STRUCTURE:
+{{PROJECT_STRUCTURE}}
+
 Read each RULES file, then begin.
+When creating or referencing files, always use the full relative path from the
+project root as shown in PROJECT STRUCTURE (e.g. backend/contact.php, not
+just contact.php). This ensures cross-domain references stay correct.
 
 When done:
 - Update _agent/PROGRESS.md for each domain you touched

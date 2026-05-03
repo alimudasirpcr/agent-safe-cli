@@ -11,9 +11,16 @@ FROZEN:     {{FROZEN}}
 PARTIAL:    {{PARTIAL}}
 FULL-SCOPE: {{FULLSCOPE}}
 RULES:      {{RULES_FILE}}
+SCOPE:      {{SCOPE_FILE}}
 STATE:      {{GIT_STATE}}
 
-Read RULES file, then begin.
+PROJECT STRUCTURE:
+{{PROJECT_STRUCTURE}}
+
+Read RULES file and SCOPE file, then begin.
+When creating or referencing files, always use the full relative path from the
+project root as shown in PROJECT STRUCTURE (e.g. backend/contact.php, not
+just contact.php). This ensures cross-domain references stay correct.
 
 When done:
 - Update _agent/{{DOMAIN}}/PROGRESS.md

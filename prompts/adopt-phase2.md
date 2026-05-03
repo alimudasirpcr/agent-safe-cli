@@ -20,6 +20,7 @@ Files to generate:
 
 INSTRUCTIONS.summary.md per domain: FILE and TASK blank, permission table with column headers only, forbidden files populated.
 INSTRUCTIONS.md per domain: empty function registry with placeholder comment, forbidden operations, 3-4 code conventions from tech stack.
+SCOPE.md per domain: files table must use full relative paths from project root (e.g. backend/contact.php, NOT contact.php). This is critical for cross-domain file references.
 PROGRESS.md: NOW/TOUCHED/DONE/NEXT/BLOCKERS/Archive all empty.
 
 After ALL files, output the frozen function tag list, one block per file:

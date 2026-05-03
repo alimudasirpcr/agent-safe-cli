@@ -41,7 +41,11 @@ MASTER-PROGRESS.md:
   Last safe state: {{SAFE_STATE}}. Include a human session setup checklist.
 
 For each domain, four files:
-  SCOPE.md — READ-ONLY header, files table, read-only refs, hard boundaries
+  SCOPE.md — READ-ONLY header, files table, read-only refs, hard boundaries.
+    IMPORTANT: In the files table, always use full relative paths from the
+    project root (e.g. backend/contact.php, frontend/src/App.tsx), NOT just
+    the filename (contact.php, App.tsx). This ensures cross-domain file
+    references are correct when agents work in different domains.
   INSTRUCTIONS.summary.md — FILE/TASK blank, empty permission table with
     column headers (Function, File, Status), forbidden files populated
   INSTRUCTIONS.md — header note, empty function registry with placeholder
