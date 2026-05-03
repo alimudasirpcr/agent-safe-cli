@@ -109,15 +109,11 @@ agent-safe skill add webapp-testing
 # From an officialskills.sh URL
 agent-safe skill add https://officialskills.sh/anthropics/skills/webapp-testing
 
-# From a GitHub repo (requires --skill)
+# From a GitHub repo (requires --skill to name it)
 agent-safe skill add https://github.com/anthropics/skills --skill webapp-testing
-```
 
-### List and remove skills
-
-```bash
-agent-safe skill list
-agent-safe skill remove webapp-testing
+# From a different branch
+agent-safe skill add webapp-testing --branch main
 ```
 
 ### Suggest skills with AI
@@ -125,31 +121,59 @@ agent-safe skill remove webapp-testing
 `skill suggest` reads your project's README, fetches the available skills catalog, and asks your configured AI provider which skills would be useful:
 
 ```bash
-# Interactive — shows suggestions, lets you pick (e.g., "1 3 16" for multiple)
+# Interactive — shows AI suggestions, pick by number
 agent-safe skill suggest
 
-# Auto-install all suggestions without prompting
+# Auto-install all AI suggestions
 agent-safe skill suggest --yes
 
-# Re-fetch catalog from GitHub (ignore cached version)
+# Re-fetch catalog from GitHub (ignore cache)
 agent-safe skill suggest --force
+
+# Use a specific AI provider for suggestions
+agent-safe --provider openai skill suggest
 ```
 
 The catalog is cached locally in `skills/.catalog` so subsequent runs are instant. Use `--force` to refresh it. You can select multiple skills by number (e.g., `1 3 16`) or type `all` to install everything.
 
 If no README is found, it shows the full catalog for manual selection. Uses the configured `--provider` (default: claude).
 
-### Use skills in a session
-
-Pass `--skill` when starting or continuing a session. You can specify multiple skills with commas or repeated flags:
+### List and remove skills
 
 ```bash
-agent-safe start domain file "task" --skill webapp-testing
-agent-safe start domain file "task" --skill webapp-testing,another-skill
-agent-safe continue --skill webapp-testing
+agent-safe skill list        # show installed skills
+agent-safe skill remove webapp-testing   # uninstall a skill
 ```
 
-Skill content is appended to the assembled prompt, giving the AI agent additional instructions for the session.
+### Use skills in a session
+
+Pass `--skill` when starting, continuing, or recovering a session. The skill's instructions are appended to the assembled prompt:
+
+```bash
+# Single skill
+agent-safe start domain file "task" --skill webapp-testing
+
+# Multiple skills (comma-separated)
+agent-safe start domain file "task" --skill webapp-testing,mcp-builder
+
+# With continue and recover
+agent-safe continue --skill webapp-testing
+agent-safe recover --skill webapp-testing
+```
+
+### Complete workflow example
+
+```bash
+# 1. Let AI suggest skills based on your project
+agent-safe skill suggest
+
+# 2. Review suggestions and pick by number (e.g., 1 4 16)
+# 3. Start a session with the installed skill
+agent-safe start backend auth.php "Add login rate limiting" --skill webapp-testing
+
+# 4. Later, resume with the same skill
+agent-safe continue --skill webapp-testing
+```
 
 ### Skill storage
 
@@ -173,6 +197,7 @@ These can be placed before or after the subcommand.
 | `--write` | Write mode for `tag` — inserts tags into source files |
 | `--multi-domain [D1,D2,...]` | Multi-domain mode for `start` — open access across listed domains |
 | `--skill NAMES` | Comma-separated skill names to inject into session prompts |
+| `--force` | Re-fetch skills catalog from GitHub (for `skill suggest`) |
 | `-h, --help` | Show help |
 | `-v, --version` | Show version |
 
