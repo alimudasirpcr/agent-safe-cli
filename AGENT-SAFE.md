@@ -1,8 +1,100 @@
 # agent-safe CLI
 
-A CLI that wraps the AI Agent Safety Framework. It assembles prompts, manages `_agent/` state files, and constrains AI agents to scoped domains with permission boundaries.
+**Give your AI agent boundaries, context, and skills — so it ships code you can trust.**
 
-## Setup
+agent-safe is a CLI that wraps any AI coding agent (Claude, OpenAI, Gemini, Ollama, or your own) with scoped domains, permission boundaries, progress tracking, and skill injection. It assembles structured prompts so the AI knows exactly what it can and can't touch.
+
+## Why agent-safe?
+
+Without guardrails, AI agents modify the wrong files, break existing logic, and lose context between sessions. agent-safe solves this by:
+
+- **Scoping domains** — the AI only sees and edits files in the domain you assign
+- **Tagging permissions** — `@agent: FROZEN`, `PARTIAL`, `FULL-SCOPE` tags tell the AI exactly which functions it can change
+- **Tracking progress** — every session updates `PROGRESS.md` so the next session picks up where you left off
+- **Injecting skills** — pull specialized instructions (webapp testing, MCP building, etc.) from the [Anthropic Skills](https://github.com/anthropics/skills) registry and inject them into sessions
+- **Multi-provider** — works with Claude, OpenAI, Gemini, Ollama, or any custom command
+
+## 60-Second Quickstart
+
+```bash
+# 1. Clone into your project
+git clone https://github.com/alimudasirpcr/agent-safe-cli.git .agent-safe-cli
+
+# 2. Copy the wrapper and config (Windows)
+copy .agent-safe-cli\agent-safe.cmd .
+copy .agent-safe-cli\agent-safe.env.example .agent-safe.env
+
+# — or Mac/Linux —
+cp .agent-safe-cli/agent-safe.sh .
+cp .agent-safe-cli/agent-safe.env.example .agent-safe.env
+
+# 3. Set your AI provider in .agent-safe.env
+#    AGENT_SAFE_PROVIDER=claude    # or openai, gemini, ollama, custom
+
+# 4. Set up your project (one-time)
+./agent-safe adopt          # infer structure from your codebase
+./agent-safe tag --write    # tag functions with permission levels
+./agent-safe verify         # confirm everything looks good
+
+# 5. Start a scoped session
+./agent-safe start backend auth.php "Add rate limiting"
+
+# 6. Add skills (optional)
+./agent-safe skill suggest   # AI recommends skills based on your README
+./agent-safe start backend auth.php "Add rate limiting" --skill webapp-testing
+```
+
+## How It Works
+
+```
+  Your Codebase                     agent-safe                         AI Agent
+  ┌─────────────┐              ┌──────────────┐              ┌─────────────┐
+  │ src/        │   ┌──────────│  assemble     │──────────►  │  scoped     │
+  │ _agent/     │   │          │  prompt from  │             │  session    │
+  │ README.md   │   │          │  templates +  │             │  prompt     │
+  └─────────────┘   │          │  state files  │             └─────────────┘
+                    │          └──────────────┘
+   ┌────────────┐  │                 │
+   │  FROZEN    │──┤          ┌───────┴───────┐
+   │  PARTIAL   │  │          │  + skill      │
+   │  FULL-SCOPE│──┘          │  instructions  │
+   └────────────┘             └───────────────┘
+```
+
+1. `adopt` or `init` — scans your project and creates `_agent/` state files (domains, rules, scope)
+2. `tag --write` — marks each function as FROZEN / PARTIAL / FULL-SCOPE in your source code
+3. `start` — assembles a prompt with domain, file, task, permissions, rules, and git state
+4. You paste the prompt into your AI. The AI works within the boundaries you set.
+5. `end` / `continue` / `recover` — manage session lifecycle
+
+## Skills
+
+Skills add specialized instructions to your session prompts. They come from the [Anthropic Skills](https://github.com/anthropics/skills) registry or any GitHub repo.
+
+```bash
+# Let AI recommend skills based on your README
+agent-safe skill suggest
+
+# Install a specific skill
+agent-safe skill add webapp-testing
+
+# Use a skill in a session
+agent-safe start backend auth.php "Add rate limiting" --skill webapp-testing
+
+# Multiple skills
+agent-safe start backend auth.php "Add rate limiting" --skill webapp-testing,mcp-builder
+```
+
+| Command | What it does |
+|---------|--------------|
+| `skill add <name\|url>` | Install a skill from the registry or GitHub |
+| `skill suggest` | AI recommends skills based on your README |
+| `skill list` | Show installed skills |
+| `skill remove <name>` | Uninstall a skill |
+
+Skills are cached locally in `skills/`. Use `--force` to re-fetch, `--branch` to pick a branch.
+
+---
 
 ### Windows (PowerShell or CMD)
 
