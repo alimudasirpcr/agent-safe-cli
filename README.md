@@ -73,26 +73,18 @@ cp .agent-safe-cli/agent-safe.env.example .agent-safe.env
 
 1. `adopt` or `init` — scans your project and creates `_agent/` state files (domains, rules, scope)
 2. `tag --write` — marks each function as FROZEN / PARTIAL / FULL-SCOPE in your source code
-3. `start` — assembles a prompt with domain, file, task, permissions, rules, and git state
-4. You paste the prompt into your AI. The AI works within the boundaries you set.
-5. `end` / `continue` / `recover` — manage session lifecycle
+3. `start` — runs a scoped Claude session (assembles prompt and pipes to `claude -p`). Use `--print-only` to get the prompt text for manual paste.
+4. `end` / `continue` / `recover` — manage session lifecycle
 
 ## Skills
 
-Skills add specialized instructions to your session prompts. Install from the [Anthropic Skills](https://github.com/anthropics/skills) registry, get AI-powered suggestions, and inject them into sessions. [See full reference below.](#skills-1)
+Install specialized instructions from the [Anthropic Skills](https://github.com/anthropics/skills) registry and inject them into sessions. [Full reference below.](#skills-1)
 
 ```bash
-agent-safe skill suggest          # AI recommends skills based on your README
+agent-safe skill suggest          # AI recommends skills for your project
 agent-safe skill add webapp-testing
 agent-safe start backend auth.php "Add rate limiting" --skill webapp-testing
 ```
-
-| Command | What it does |
-|---------|--------------|
-| `skill add <name\|url>` | Install a skill from the registry or GitHub |
-| `skill suggest` | AI recommends skills based on your README |
-| `skill list` | Show installed skills |
-| `skill remove <name>` | Uninstall a skill |
 
 ## Test Commands
 
@@ -191,11 +183,11 @@ my-project/
 | `adopt` | Set up framework on an existing project | Yes |
 | `tag` | Scan source files, suggest/insert `@agent` tags | Yes |
 | `verify` | Check framework setup is correct | Yes (deep check) |
-| `start` | Begin a scoped coding session | No (prints prompt) |
-| `continue` | Resume an in-progress session | No (prints prompt) |
-| `recover` | Recover context after a lost session | No (prints prompt) |
-| `end` | Close a session, update progress files | No (prints prompt) |
-| `end-progress` | Update MASTER-PROGRESS.md for domain handoff | No (prints prompt) |
+| `start` | Begin a scoped coding session | Runs claude -p (or `--print-only`) |
+| `continue` | Resume an in-progress session | Runs claude -p (or `--print-only`) |
+| `recover` | Recover context after a lost session | Runs claude -p (or `--print-only`) |
+| `end` | Close a session, update progress files | Runs claude -p (or `--print-only`) |
+| `end-progress` | Update MASTER-PROGRESS.md for domain handoff | Runs claude -p (or `--print-only`) |
 | `skill add` | Install a skill from the registry or GitHub | Yes (downloads) |
 | `skill suggest` | AI-powered skill suggestions based on README | Yes (AI + downloads) |
 | `skill list` | List installed skills | No |
@@ -310,6 +302,7 @@ These can be placed before or after the subcommand.
 | `--write` | Write mode for `tag` — inserts tags into source files |
 | `--multi-domain [D1,D2,...]` | Multi-domain mode for `start` — open access across listed domains |
 | `--skill NAMES` | Comma-separated skill names to inject into session prompts |
+| `--print-only` | Print prompt text instead of running claude -p (default runs Claude) |
 | `--force` | Re-fetch skills catalog from GitHub (for `skill suggest`) |
 | `-h, --help` | Show help |
 | `-v, --version` | Show version |
@@ -509,7 +502,7 @@ Two-phase check: fast local validation, then deep AI-powered verification.
 
 ## Session Commands
 
-These commands assemble a prompt with all the context an AI agent needs, then offer to copy it to your clipboard. You paste it into a new AI session.
+These commands assemble a prompt with all the context an AI agent needs. By default (with `--provider claude`), the prompt is piped directly to `claude -p`. Use `--print-only` to get the prompt text for manual paste into any AI.
 
 ### `start` — Begin a Session
 

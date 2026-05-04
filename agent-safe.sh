@@ -80,7 +80,7 @@ MULTI_DOMAIN=""
 SKILL_NAMES=""
 SUGGEST_YES=false
 FORCE_REFRESH=false
-RUN_MODE=false
+PRINT_ONLY=false
 PROVIDER="${AGENT_SAFE_PROVIDER:-claude}"
 AI_MODEL="${AGENT_SAFE_MODEL:-}"
 
@@ -106,7 +106,8 @@ Commands:
   adopt                             Run FB-03 (existing project, infers structure)
   tag [--write]                     Run FB-04 (scan src/, output @agent tags)
                                     --write inserts tags directly into source files
-  verify                            Run FB-05 (fast local checks + deep Claude verify)
+  verify                            Fast local checks + deep Claude verify
+  verify-diff                       Check git diff against @agent tag boundaries
   start [DOMAIN] [FILE] "TASK"     Assemble SM-01 session prompt
        --multi-domain [D1,D2,...]   Multi-domain: open edit access across domains
                                     No argument = all domains; or list specific ones
@@ -115,7 +116,7 @@ Commands:
   end [DOMAIN]                     Assemble SM-04 end-session prompt
   end-progress [DONE_DOMAIN]       Assemble master progress update
                                     [NEXT_DOMAIN] [BLOCKER]
-  install-hooks                     Install git pre-commit hook (runs verify)
+  install-hooks                     Install git pre-commit hook (runs verify-diff)
   review diff [DOMAIN]             Explain git diff in plain English (RV-02)
   review feedback [DOMAIN]         Address reviewer blockers only (RV-03)
   review summary [DOMAIN] "GOAL"   Generate pre-review summary (RV-04)
@@ -138,7 +139,8 @@ Options:
   --model MODEL                    Model name (provider-specific, e.g. gpt-4o, gemini-2.0-flash)
   --max-turns N                    Max turns per call (default: 40, Claude only)
   --skill NAMES                    Comma-separated skill names to inject into session prompts
-  --run                            Run session via claude -p instead of printing prompt (Claude only)
+  --run                            Run session via claude -p (default when provider is claude)
+  --print-only                     Print prompt text instead of running claude -p
   -h, --help                        Show this help
   -v, --version                     Show version
 
@@ -472,8 +474,22 @@ warn_non_claude() {
     log_warn "Provider is '${PROVIDER}' — session prompts are assembled but not executed."
     log_warn "Non-Claude providers run in advice mode: the AI responds with text only,"
     log_warn "it cannot apply file edits or update PROGRESS.md automatically."
-    log_warn "Use --provider claude or --run for direct execution."
+    log_warn "Use --provider claude for direct execution, or --print-only to get the prompt."
     echo ""
+  fi
+}
+
+# A-05: Refuse agentic session commands when provider cannot execute them.
+# These commands require an agentic loop (file edits, PROGRESS updates).
+# Non-Claude providers can only work in --print-only (advice) mode.
+require_claude_or_print_only() {
+  if [ "$PROVIDER" != "claude" ] && [ "$PRINT_ONLY" != true ]; then
+    log_error "The '${PROVIDER}' provider cannot execute session commands."
+    log_error "Session commands require an agentic loop (file edits, PROGRESS.md updates)."
+    log_error "Use one of:"
+    log_error "  --provider claude       Run via Claude CLI (recommended)"
+    log_error "  --print-only            Print the prompt for manual paste into any AI"
+    exit 1
   fi
 }
 
@@ -1377,13 +1393,113 @@ cmd_verify() {
 }
 
 # ============================================================================
+# COMMAND: verify-diff — Check git diff against @agent tag boundaries
+# ============================================================================
+cmd_verify_diff() {
+  local domain="" violations=0
+
+  if [ $# -ge 1 ] && [ -d "_agent/$1" ]; then
+    domain="$1"
+    shift || true
+  fi
+
+  if [ -z "$domain" ]; then
+    if [ -f "_agent/MASTER-PROGRESS.md" ]; then
+      domain=$(grep -iE "ACTIVE_DOMAIN:?[[:space:]]*" _agent/MASTER-PROGRESS.md | head -1 \
+        | sed -E 's/.*ACTIVE_DOMAIN:?[[:space:]]*//' | xargs || echo "")
+    fi
+    local available_domains
+    available_domains=$(find _agent -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sed 's|_agent/||' | sort)
+    if [ -z "$domain" ] && [ "$(echo "$available_domains" | wc -l | xargs)" -eq 1 ]; then
+      domain="$available_domains"
+    fi
+  fi
+
+  if [ ! -d ".git" ]; then
+    log_error "verify-diff requires a git repository."
+    exit 1
+  fi
+
+  # Get staged and unstaged changes
+  local diff_output
+  diff_output=$(git diff --name-only 2>/dev/null; git diff --cached --name-only 2>/dev/null | sort -u)
+
+  if [ -z "$diff_output" ]; then
+    log_success "No uncommitted changes found. Nothing to verify."
+    return 0
+  fi
+
+  echo ""
+  echo -e "${BOLD}═══ verify-diff: Boundary check ═══${NC}"
+  echo ""
+  log "Checking ${domain:-all} changes against @agent tag boundaries..."
+  echo ""
+
+  # Check each changed file for FROZEN/PARTIAL violations
+  while IFS= read -r changed_file; do
+    [ -z "$changed_file" ] && continue
+
+    # Extract @agent tags for functions in this file
+    local tags_in_file
+    tags_in_file=$(grep -n "@agent:" "$changed_file" 2>/dev/null || true)
+
+    if [ -z "$tags_in_file" ]; then
+      continue  # No tags, no restrictions
+    fi
+
+    # Get the diff for this file
+    local file_diff
+    file_diff=$(git diff -- "$changed_file" 2>/dev/null; git diff --cached -- "$changed_file" 2>/dev/null)
+
+    # Check if any FROZEN or PARTIAL tagged lines are in the diff
+    while IFS= read -r tag_line; do
+      local line_num
+      line_num=$(echo "$tag_line" | cut -d: -f1)
+      local tag_type
+      tag_type=$(echo "$tag_line" | sed -E 's/.*@agent:[[:space:]]*(FROZEN|PARTIAL|FULL-SCOPE).*/\1/' | head -1)
+
+      if [ "$tag_type" = "FROZEN" ] || [ "$tag_type" = "PARTIAL" ]; then
+        # Check if changes are near this tagged line (within 20 lines)
+        local near_changes=false
+        local start_line=$((line_num - 20))
+        local end_line=$((line_num + 20))
+        if echo "$file_diff" | grep -q "^@@.*+${start_line},${end_line}" 2>/dev/null || \
+           echo "$file_diff" | awk "/^@@/{s=0} /^@@.*[+-]${line_num}/{s=1} s" | grep -q .; then
+          near_changes=true
+        fi
+        if [ "$near_changes" = true ]; then
+          echo -e "  ${RED}VIOLATION${NC}: ${tag_type} function at ${changed_file}:${line_num}"
+          violations=$((violations + 1))
+        fi
+      fi
+    done <<< "$tags_in_file"
+  done <<< "$diff_output"
+
+  echo ""
+  if [ "$violations" -eq 0 ]; then
+    log_success "No boundary violations found. All changes are within FULL-SCOPE areas."
+    return 0
+  else
+    log_error "${violations} boundary violation(s) found. FROZEN/PARTIAL functions were modified."
+    log_error "Use 'git commit --no-verify' to bypass this check."
+    return 1
+  fi
+}
+
+# ============================================================================
 # A-06: Output assembled prompt — either run directly or print + clipboard
 # ============================================================================
 prompt_output() {
   local prompt="$1"
 
-  if [ "$RUN_MODE" = true ] && [ "$PROVIDER" = "claude" ] && command -v claude &>/dev/null; then
-    # A-06: Drive Claude directly
+  # A-06: Default is to run Claude directly when available.
+  # Use --print-only to get the prompt text for manual paste.
+  local should_run=false
+  if [ "$PRINT_ONLY" != true ] && [ "$PROVIDER" = "claude" ] && command -v claude &>/dev/null; then
+    should_run=true
+  fi
+
+  if [ "$should_run" = true ]; then
     log "Running session via claude -p ..."
     local exit_code=0
     # shellcheck disable=SC2086
@@ -1395,7 +1511,7 @@ prompt_output() {
     return $exit_code
   fi
 
-  # Default: print prompt and offer clipboard
+  # Print prompt and offer clipboard (--print-only or non-Claude provider)
   echo ""
   echo -e "${BOLD}═══ Session prompt — paste this into your AI ═══${NC}"
   echo ""
@@ -1403,10 +1519,6 @@ prompt_output() {
   echo ""
   echo -e "${BOLD}═══════════════════════════════════════════════${NC}"
   echo ""
-
-  if [ "$RUN_MODE" = true ] && [ "$PROVIDER" != "claude" ]; then
-    log_warn "--run requires --provider claude. Printing prompt instead."
-  fi
 
   # Copy to clipboard
   if command -v pbcopy &>/dev/null || command -v clip &>/dev/null || command -v xclip &>/dev/null; then
@@ -1650,6 +1762,7 @@ cmd_start() {
     prompt=$(inject_skills "$prompt" "$SKILL_NAMES")
   fi
 
+  require_claude_or_print_only
   warn_non_claude
   prompt_output "$prompt"
 }
@@ -1907,6 +2020,7 @@ cmd_start_multi_domain() {
     prompt=$(inject_skills "$prompt" "$SKILL_NAMES")
   fi
 
+  require_claude_or_print_only
   warn_non_claude
   prompt_output "$prompt"
 }
@@ -1999,8 +2113,8 @@ cmd_continue() {
 
   local scope_file="_agent/${domain}/SCOPE.md"
 
-  # U-06: Auto-detect drift — if PROGRESS.md is missing or git has uncommitted
-  # changes, suggest recover instead of continue
+  # U-06: Auto-detect drift — if PROGRESS.md is missing or domain has uncommitted
+  # changes in _agent/, switch to recovery mode instead of continue
   local progress_file="_agent/${domain}/PROGRESS.md"
   local has_drift=false
   if [ ! -f "$progress_file" ] || [ ! -s "$progress_file" ]; then
@@ -2019,8 +2133,11 @@ cmd_continue() {
 
   if [ "$has_drift" = true ]; then
     log_warn "Progress file is missing or domain has uncommitted changes."
-    log_warn "Falling back to recovery mode. Use 'agent-safe recover' to force recovery."
+    log_warn "Switching to recovery mode. Use '--print-only recover' to force recovery prompt."
     echo ""
+    # Delegate to recovery with the same domain and file
+    cmd_recover "$domain" "$file"
+    return $?
   fi
 
   # Build project directory tree
@@ -2053,6 +2170,7 @@ cmd_continue() {
     prompt=$(inject_skills "$prompt" "$SKILL_NAMES")
   fi
 
+  require_claude_or_print_only
   warn_non_claude
   prompt_output "$prompt"
 }
@@ -2155,6 +2273,7 @@ cmd_recover() {
     prompt=$(inject_skills "$prompt" "$SKILL_NAMES")
   fi
 
+  require_claude_or_print_only
   warn_non_claude
   prompt_output "$prompt"
 }
@@ -2223,6 +2342,7 @@ cmd_end() {
 
   local prompt
   prompt=$(load_prompt end-session "DOMAIN=${domain}" "DATE=${date_str}")
+  require_claude_or_print_only
   warn_non_claude
   prompt_output "$prompt"
 }
@@ -2312,6 +2432,7 @@ cmd_end_progress() {
     "COMPLETED_DATE=${completed_date}" \
     "BLOCKER_DESCRIPTION=${blocker}" \
     "BLOCKER_DATE=${blocker_date}")
+  require_claude_or_print_only
   warn_non_claude
   prompt_output "$prompt"
 }
@@ -2802,12 +2923,12 @@ cmd_install_hooks() {
 #!/bin/sh
 # agent-safe pre-commit hook — runs verify to check framework integrity
 # Installed by: agent-safe install-hooks
-echo "agent-safe: Running verify..."
+echo "agent-safe: Running verify-diff..."
 HOOK_CMD="$(dirname "$0")/../../agent-safe.sh"
 if [ ! -f "$HOOK_CMD" ]; then
   HOOK_CMD="agent-safe"
 fi
-"$HOOK_CMD" verify
+"$HOOK_CMD" verify-diff
 exit_code=$?
 if [ $exit_code -ne 0 ]; then
   echo "agent-safe: verify failed. Commit aborted."
@@ -2818,7 +2939,7 @@ HOOK_EOF
 
   chmod +x "$hook_file" 2>/dev/null
   log_success "pre-commit hook installed at ${hook_file}"
-  log "The hook runs 'agent-safe verify' before each commit."
+  log "The hook runs 'agent-safe verify-diff' before each commit."
   log "To bypass: git commit --no-verify"
   log "To uninstall: rm ${hook_file}"
 }
@@ -3415,7 +3536,8 @@ for arg in "${PREPASS_ARGS[@]}"; do
     --write) WRITE_MODE=true ;;
     --yes|-y) SUGGEST_YES=true ;;
     --force|-f) FORCE_REFRESH=true ;;
-    --run) RUN_MODE=true ;;
+    --run) PRINT_ONLY=false ;;
+    --print-only) PRINT_ONLY=true ;;
     *) REMAINING+=("$arg") ;;
   esac
 done
@@ -3425,6 +3547,7 @@ case "$SUBCOMMAND" in
   adopt)    cmd_adopt "${REMAINING[@]+"${REMAINING[@]}"}" ;;
   tag)      cmd_tag "${REMAINING[@]+"${REMAINING[@]}"}" ;;
   verify)   cmd_verify "${REMAINING[@]+"${REMAINING[@]}"}" ;;
+  verify-diff) cmd_verify_diff "${REMAINING[@]+"${REMAINING[@]}"}" ;;
   start)    cmd_start "${REMAINING[@]+"${REMAINING[@]}"}" ;;
   continue) cmd_continue "${REMAINING[@]+"${REMAINING[@]}"}" ;;
   recover)  cmd_recover "${REMAINING[@]+"${REMAINING[@]}"}" ;;
