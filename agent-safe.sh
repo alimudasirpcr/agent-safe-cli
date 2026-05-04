@@ -2576,10 +2576,10 @@ cmd_review_summary() {
 # ============================================================================
 
 cmd_test_unit() {
-  local domain="" file="" functions="${1:-}"
+  local domain="" file="" functions=""
 
   # Parse args: [DOMAIN] [FILE] "FUNCTIONS" or auto-detect
-  if [ -d "_agent/$1" ]; then
+  if [ $# -ge 1 ] && [ -d "_agent/$1" ]; then
     domain="$1"
     shift || true
   fi
@@ -2772,12 +2772,15 @@ cmd_test_coverage() {
 }
 
 cmd_test_regression() {
-  local domain="" file="${1:-}"
+  local domain="" file=""
 
-  if [ -d "_agent/$1" ]; then
+  if [ $# -ge 1 ] && [ -d "_agent/$1" ]; then
     domain="$1"
     shift || true
-    file="${1:-.}"
+    if [ $# -ge 1 ]; then
+      file="$1"
+      shift || true
+    fi
   elif [ $# -ge 1 ]; then
     file="$1"
     shift || true
