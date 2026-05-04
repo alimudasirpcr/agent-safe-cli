@@ -18,6 +18,8 @@ set -uo pipefail
 # Note: removed -e (errexit) to prevent silent exits on non-zero returns from AI commands
 # Errors are handled explicitly with if/return checks in run_ai_* functions
 
+umask 077  # S-04: Ensure temp files and directories are created 0600/0700 by default
+
 VERSION="0.3.0"
 
 # Load config from .agent-safe.env files (project-local first, then global)
@@ -34,6 +36,8 @@ _load_env() {
   fi
   for cfg in "${config_files[@]}"; do
     while IFS= read -r line || [ -n "$line" ]; do
+      # Q-05: Strip UTF-8 BOM if present (from Notepad saves)
+      line="${line#$(printf '\xef\xbb\xbf')}"
       # Strip Windows carriage return
       line="${line%$'\r'}"
       # Skip comments and empty lines
@@ -43,9 +47,15 @@ _load_env() {
       if [[ "$line" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; then
         local key="${line%%=*}"
         local val="${line#*=}"
+        # S-07: Reject values containing command substitution
+        if [[ "$val" == *'$('* ]] || [[ "$val" == *'`'* ]]; then
+          echo "agent-safe: rejecting unsafe value in ${key}: command substitution not allowed" >&2
+          continue
+        fi
         # Don't override env vars that are already set
         if [ -z "${!key+x}" ]; then
-          export "$key=$val"
+          printf -v "$key" '%s' "$val"
+          export "$key"
         fi
       fi
     done < "$cfg"
@@ -60,7 +70,7 @@ SKILLS_DIR="${AGENT_SAFE_SKILLS_DIR:-${SCRIPT_DIR}/skills}"
 
 DATE=$(date +%Y-%m-%d)
 TIMESTAMP=$(date +%H%M%S)
-LOG_DIR="/tmp/agent-safe-${DATE}-${TIMESTAMP}"
+LOG_DIR=$(mktemp -d -t agent-safe.XXXXXXXX)  # S-05: Unpredictable path to prevent symlink attacks
 
 MODEL_FLAG=""
 MAX_TURNS=40
@@ -323,38 +333,33 @@ resolve_project_root() {
   PROJECT_ROOT="${PROJECT_ROOT%/}"
 }
 
+# Resolve a path to its canonical absolute form, following symlinks.
+# Falls back to cd+pwd if realpath is not available.
+_resolve_path() {
+  local target="$1"
+  if command -v realpath &>/dev/null; then
+    realpath -m "$target" 2>/dev/null && return
+  fi
+  # Fallback: cd into the parent dir and resolve via pwd
+  local dir_part base_part
+  dir_part=$(dirname "$target")
+  base_part=$(basename "$target")
+  local resolved_dir
+  resolved_dir=$(cd "$dir_part" 2>/dev/null && pwd || echo "$dir_part")
+  echo "${resolved_dir}/${base_part}"
+}
+
 # Returns 0 if path is inside the project, 1 otherwise.
 is_safe_path() {
   local target="$1"
 
-  # Reject paths containing .. components (path traversal)
-  local normalized
-  normalized=$(cd / 2>/dev/null && realpath --relative-to=/ "$target" 2>/dev/null || echo "")
-  if [[ "$target" == *".."* ]]; then
-    return 1
-  fi
+  # S-08: Canonicalize the target path
+  local resolved_target
+  resolved_target=$(_resolve_path "$target")
 
-  # Reject absolute paths outside the project (Unix /... and Windows C:/... style)
-  if [[ "$target" = /* ]] || [[ "$target" == [A-Za-z]:/* ]]; then
-    # Normalize and compare
-    local abs_resolved
-    abs_resolved=$(cd "$(dirname "$target")" 2>/dev/null && pwd || echo "$(dirname "$target")")
-    abs_resolved="${abs_resolved%/}"
-    if [[ "$abs_resolved" != "${PROJECT_ROOT}"* ]]; then
-      return 1
-    fi
-  fi
-
-  # For relative paths, check the resolved absolute path
-  local abs_path="${PROJECT_ROOT}/${target}"
-  local dir_part base_part resolved
-  dir_part=$(dirname "$abs_path")
-  base_part=$(basename "$abs_path")
-  resolved=$(cd "$dir_part" 2>/dev/null && pwd || echo "$dir_part")
-  abs_path="${resolved}/${base_part}"
-  abs_path="${abs_path%/}"
-
-  if [[ "$abs_path" != "${PROJECT_ROOT}"/* ]]; then
+  # Reject if the resolved path does not start with PROJECT_ROOT/
+  # Use trailing-slash comparison to prevent /foo matching /foobar
+  if [[ "$resolved_target" != "${PROJECT_ROOT}/"* ]] && [[ "$resolved_target" != "${PROJECT_ROOT}" ]]; then
     return 1
   fi
   return 0
@@ -434,7 +439,12 @@ preflight() {
 
   resolve_project_root
   mkdir -p "$LOG_DIR"
-  chmod 700 "$LOG_DIR"
+  # S-06: chmod 700 is a no-op on Windows/NTFS — warn the user
+  if chmod 700 "$LOG_DIR" 2>/dev/null; then
+    if [[ "$(uname -s)" =~ MINGW|MSYS|CYGWIN ]]; then
+      log_warn "chmod 700 is not effective on Windows/NTFS. Log files may be readable by other users."
+    fi
+  fi
 }
 
 # ============================================================================
@@ -484,7 +494,12 @@ run_ai_openai() {
     '{model: $model, messages: [{role: "user", content: $prompt}]}' \
     > "$body_file"
 
-  curl -s https://api.openai.com/v1/chat/completions \
+  local tls_opts="--proto =https --tlsv1.2"
+  if [ -n "${AGENT_SAFE_CA_BUNDLE:-}" ]; then
+    tls_opts="$tls_opts --cacert $AGENT_SAFE_CA_BUNDLE"
+  fi
+
+  curl -s $tls_opts --fail-with-body https://api.openai.com/v1/chat/completions \
     -H "Authorization: Bearer $OPENAI_API_KEY" \
     -H "Content-Type: application/json" \
     -d @"$body_file" \
@@ -517,8 +532,14 @@ run_ai_gemini() {
     '{contents: [{parts: [{text: $prompt}]}]}' \
     > "$body_file"
 
-  curl -s "https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_API_KEY}" \
+  local tls_opts="--proto =https --tlsv1.2"
+  if [ -n "${AGENT_SAFE_CA_BUNDLE:-}" ]; then
+    tls_opts="$tls_opts --cacert $AGENT_SAFE_CA_BUNDLE"
+  fi
+
+  curl -s $tls_opts --fail-with-body "https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent" \
     -H "Content-Type: application/json" \
+    -H "x-goog-api-key: $GEMINI_API_KEY" \
     -d @"$body_file" \
     | jq -r '.candidates[0].content.parts[0].text // .error.message // "No response"' \
     > "$out_file"
@@ -612,18 +633,27 @@ run_ai_custom() {
     pipe_stdin=true
   fi
 
+  # Parse command into an array to avoid eval
+  local cmd_args
+  read -ra cmd_args <<< "$cmd"
+  if [ ${#cmd_args[@]} -eq 0 ]; then
+    log_error "AGENT_SAFE_AI_CMD is empty after placeholder substitution"
+    rm -f "$prompt_file"
+    return 1
+  fi
+
   # If no placeholder at all, pipe via stdin
-  log "Running custom command: ${AGENT_SAFE_AI_CMD%% *}"
+  log "Running custom command: ${cmd_args[0]}"
 
   local exit_code
   if $pipe_stdin; then
     # Redirect stdin from the prompt file for reliability on Windows/Git Bash
     set +o pipefail
-    eval "$cmd" < "$prompt_file" > "$out_file" 2>&1
+    "${cmd_args[@]}" < "$prompt_file" > "$out_file" 2>&1
     exit_code=$?
     set -o pipefail
   else
-    eval "$cmd" > "$out_file" 2>&1
+    "${cmd_args[@]}" > "$out_file" 2>&1
     exit_code=$?
   fi
   rm -f "$prompt_file"
@@ -2902,6 +2932,39 @@ download_skill_from_github() {
   local org="$1" repo="$2" branch="$3" skill_name="$4"
   local dest_dir="${SKILLS_DIR}/${skill_name}"
 
+  # S-03: Allowlist check — reject non-allowlisted org/repo unless --unsafe
+  if [ "${SKILL_UNSAFE:-0}" != "1" ]; then
+    local allowlist_file="${SKILLS_DIR}/.allowlist"
+    local org_repo="${org}/${repo}"
+    local is_allowed=false
+    if [ -f "$allowlist_file" ]; then
+      while IFS= read -r allowed || [ -n "$allowed" ]; do
+        [ -z "$allowed" ] || [[ "$allowed" == \#* ]] && continue
+        if [[ "$org_repo" == ${allowed}* ]]; then
+          is_allowed=true
+          break
+        fi
+      done < "$allowlist_file"
+    else
+      # No allowlist file exists yet — create one with default trusted sources
+      mkdir -p "$SKILLS_DIR"
+      cat > "$allowlist_file" << 'ALLOWLIST_EOF'
+# agent-safe skill allowlist
+# Only org/repo prefixes listed here are allowed without --unsafe
+# One pattern per line; * is not supported — use org/ to allow all repos under an org
+anthropics/skills
+ALLOWLIST_EOF
+      is_allowed=true  # First install bootstraps the allowlist
+    fi
+
+    if [ "$is_allowed" = "false" ]; then
+      log_error "Skill source '${org_repo}' is not in the allowlist."
+      log_error "If you trust this source, add it to ${allowlist_file} or use --unsafe:"
+      log_error "  agent-safe skill add <url> --unsafe"
+      return 1
+    fi
+  fi
+
   if [ -d "$dest_dir" ]; then
     log_warn "Skill '${skill_name}' already exists at ${dest_dir}"
     echo -n "Overwrite? [y/N] "
@@ -2914,6 +2977,14 @@ download_skill_from_github() {
   fi
 
   mkdir -p "$dest_dir"
+
+  # Resolve commit SHA for integrity tracking
+  local commit_sha=""
+  local sha_response
+  sha_response=$(curl -sL "https://api.github.com/repos/${org}/${repo}/commits?sha=${branch}&per_page=1" 2>/dev/null | tr -d '\r')
+  if echo "$sha_response" | jq -e '.[0].sha' &>/dev/null; then
+    commit_sha=$(echo "$sha_response" | jq -r '.[0].sha' | tr -d '\r')
+  fi
 
   local base_url="https://raw.githubusercontent.com/${org}/${repo}/${branch}/skills/${skill_name}"
 
@@ -2996,28 +3067,42 @@ download_skill_from_github() {
     log_warn "SKILL.md is missing 'name' in frontmatter. Using directory name: ${skill_name}"
   fi
 
+  # Record commit SHA for integrity tracking
+  if [ -n "$commit_sha" ]; then
+    cat > "${dest_dir}/.installed.json" << INSTALL_EOF
+{"org":"${org}","repo":"${repo}","branch":"${branch}","sha":"${commit_sha}","installed_at":"$(date -u +%Y-%m-%dT%H:%M:%SZ)"}
+INSTALL_EOF
+    log "Pinned to commit ${commit_sha:0:8}"
+  fi
+
   log_success "Skill '${skill_name}' installed to ${dest_dir}"
 }
 
 cmd_skill_add() {
-  local skill_source="" skill_name="" branch="main"
+  local skill_source="" skill_name="" branch="main" unsafe=false
 
   while [ $# -gt 0 ]; do
     case "$1" in
       --skill)   skill_name="$2"; shift 2 ;;
       --branch)  branch="$2"; shift 2 ;;
+      --unsafe)  unsafe=true; shift ;;
       *)         skill_source="$1"; shift ;;
     esac
   done
 
   if [ -z "$skill_source" ]; then
-    log_error "Usage: agent-safe skill add <name|url> [--skill NAME] [--branch BRANCH]"
+    log_error "Usage: agent-safe skill add <name|url> [--skill NAME] [--branch BRANCH] [--unsafe]"
     log_error ""
     log_error "Examples:"
     log_error "  agent-safe skill add webapp-testing"
     log_error "  agent-safe skill add https://github.com/anthropics/skills --skill webapp-testing"
     log_error "  agent-safe skill add https://officialskills.sh/anthropics/skills/webapp-testing"
     exit 1
+  fi
+
+  # Pass unsafe flag to download function via environment variable
+  if [ "$unsafe" = "true" ]; then
+    SKILL_UNSAFE=1
   fi
 
   if [[ "$skill_source" == https://officialskills.sh/* ]]; then

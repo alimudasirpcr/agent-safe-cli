@@ -1,6 +1,6 @@
 # agent-safe CLI
 
-**Give your AI agent boundaries, context, and skills — so it ships code you can trust.**
+**Give your AI agent boundaries, context, and skills — so handoffs between sessions stay clean and code review has fewer surprises.**
 
 agent-safe is a CLI that wraps any AI coding agent (Claude, OpenAI, Gemini, Ollama, or your own) with scoped domains, permission boundaries, progress tracking, and skill injection. It assembles structured prompts so the AI knows exactly what it can and can't touch.
 
@@ -69,20 +69,12 @@ cp .agent-safe-cli/agent-safe.env.example .agent-safe.env
 
 ## Skills
 
-Skills add specialized instructions to your session prompts. They come from the [Anthropic Skills](https://github.com/anthropics/skills) registry or any GitHub repo.
+Skills add specialized instructions to your session prompts. Install from the [Anthropic Skills](https://github.com/anthropics/skills) registry, get AI-powered suggestions, and inject them into sessions. [See full reference below.](#skills-1)
 
 ```bash
-# Let AI recommend skills based on your README
-agent-safe skill suggest
-
-# Install a specific skill
+agent-safe skill suggest          # AI recommends skills based on your README
 agent-safe skill add webapp-testing
-
-# Use a skill in a session
 agent-safe start backend auth.php "Add rate limiting" --skill webapp-testing
-
-# Multiple skills
-agent-safe start backend auth.php "Add rate limiting" --skill webapp-testing,mcp-builder
 ```
 
 | Command | What it does |
@@ -91,12 +83,6 @@ agent-safe start backend auth.php "Add rate limiting" --skill webapp-testing,mcp
 | `skill suggest` | AI recommends skills based on your README |
 | `skill list` | Show installed skills |
 | `skill remove <name>` | Uninstall a skill |
-| `test unit` | Generate unit tests for a function (TS-01) |
-| `test integration` | Generate integration tests for a domain (TS-02) |
-| `test coverage` | Report test coverage gaps (TS-03) |
-| `test regression` | Run regression check before session (TS-04) |
-
-Skills are cached locally in `skills/`. Use `--force` to re-fetch, `--branch` to pick a branch.
 
 ## Test Commands
 
@@ -210,6 +196,8 @@ my-project/
 | `review summary` | Generate pre-review summary | No (prints prompt) |
 
 ---
+
+<a id="skills-1"></a>
 
 ## Skills
 
@@ -388,7 +376,7 @@ Project-local `.agent-safe.env` takes precedence over global `~/.agent-safe/.env
 
 ### Log Files
 
-Every AI call saves output to `/tmp/agent-safe-YYYY-MM-DD-HHMMSS/`. The log directory gets `chmod 700`.
+Every AI call saves output to a unique temp directory (created with `mktemp`). The log directory gets `chmod 700` (on Windows/Git Bash, a warning is printed since NTFS ACLs differ).
 
 ---
 
