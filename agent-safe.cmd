@@ -1,17 +1,17 @@
 @echo off
 REM agent-safe.cmd — Drop this in your project root. Finds a POSIX shell and runs the CLI.
 REM Usage: agent-safe adopt   OR   agent-safe start "task"
-setlocal
+setlocal enabledelayedexpansion
 
 REM Find POSIX shell: prefer WSL, then Git Bash, then MSYS2, then Cygwin
 set "BASH="
 
 REM Check WSL first (best compatibility on Windows)
 where wsl.exe >nul 2>&1
-if %errorlevel%==0 (
+if !errorlevel!==0 (
     REM Verify WSL has a working distribution
     wsl.exe -e true >nul 2>&1
-    if %errorlevel%==0 (
+    if !errorlevel!==0 (
         REM Find agent-safe.sh
         set "SH_SCRIPT="
         if exist "%~dp0.agent-safe-cli\agent-safe.sh" (
@@ -21,10 +21,10 @@ if %errorlevel%==0 (
         )
         if defined SH_SCRIPT (
             REM Convert Windows path to WSL path
-            for /f "usebackq delims=" %%p in (`wsl.exe -e wslpath "%SH_SCRIPT%"`) do set "SH_WSL=%%p"
-            wsl.exe -e bash "%SH_WSL%" %*
+            for /f "usebackq delims=" %%p in (`wsl.exe -e wslpath "!SH_SCRIPT!"`) do set "SH_WSL=%%p"
+            wsl.exe -e bash "!SH_WSL!" %*
             endlocal
-            exit /b %errorlevel%
+            exit /b !errorlevel!
         )
     )
 )

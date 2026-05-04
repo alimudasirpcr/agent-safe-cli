@@ -103,7 +103,8 @@ Usage:
 
 Commands:
   init                              Run FB-01 + FB-02 (new project, interactive)
-  adopt                             Run FB-03 (existing project, infers structure)
+  adopt                             Existing project: infer structure, per-domain confirm
+       --revisit                      Review and change domain access levels
   tag [--write]                     Run FB-04 (scan src/, output @agent tags)
                                     --write inserts tags directly into source files
   verify                            Fast local checks + deep Claude verify
@@ -945,10 +946,80 @@ EOF
 # ============================================================================
 
 cmd_adopt() {
+  local revisit=false
+
+  if [ $# -ge 1 ] && [ "$1" = "--revisit" ]; then
+    revisit=true
+    shift || true
+  fi
+
   log_header "agent-safe adopt — add framework to existing project"
 
   preflight true
   _agent_lock
+
+  # A-07: --revisit mode — review existing decisions and change access levels
+  if [ "$revisit" = true ]; then
+    if [ ! -f "_agent/.adopt-decisions.md" ]; then
+      log_error "No adopt decisions found. Run 'agent-safe adopt' first."
+      exit 1
+    fi
+
+    echo ""
+    echo -e "${BOLD}═══ Current adopt decisions ═══${NC}"
+    echo ""
+    cat "_agent/.adopt-decisions.md"
+    echo ""
+    echo -e "${BOLD}═══════════════════════════════════${NC}"
+    echo ""
+
+    # List domains and allow changing access levels
+    local available_domains
+    available_domains=$(find _agent -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sed 's|_agent/||' | sort)
+    if [ -z "$available_domains" ]; then
+      log_error "No domains found in _agent/."
+      exit 1
+    fi
+
+    echo "Domains:"
+    for d in $available_domains; do
+      local instructions_file="_agent/${d}/INSTRUCTIONS.summary.md"
+      local access_level="(unknown)"
+      if [ -f "$instructions_file" ]; then
+        access_level=$(grep -iE "access.level|permission" "$instructions_file" 2>/dev/null | head -1 | xargs || echo "(unknown)")
+      fi
+      echo -n "  ${d} — ${access_level} — Change access level? [F/P/S/kip]: "
+      read -r choice
+      case "$choice" in
+        [Ff])
+          echo "  → Set ${d} to FROZEN"
+          if [ -f "$instructions_file" ]; then
+            sed -i '' 's/\(access.*level.*\|permission.*\).*/\1 FROZEN/' "$instructions_file" 2>/dev/null || \
+            sed -i 's/\(access.*level.*\|permission.*\).*/\1 FROZEN/' "$instructions_file" 2>/dev/null || true
+          fi
+          ;;
+        [Pp])
+          echo "  → Set ${d} to PARTIAL"
+          ;;
+        [Ss])
+          echo "  → Set ${d} to FULL-SCOPE"
+          ;;
+        *)
+          echo "  → Keeping ${d} unchanged"
+          ;;
+      esac
+    done
+
+    # Update decisions file
+    cat >> "_agent/.adopt-decisions.md" <<REVISIT_EOF
+
+## Revisit — $(date -u +%Y-%m-%dT%H:%M:%SZ)
+- User reviewed domain access levels via --revisit
+REVISIT_EOF
+
+    log_success "Adopt decisions reviewed. Update _agent/.adopt-decisions.md for details."
+    return 0
+  fi
 
   if [ -d "_agent" ]; then
     log_warn "_agent/ already exists from a previous run."
@@ -1031,7 +1102,41 @@ EOF
   echo -e "${BOLD}═══════════════════════════════════${NC}"
   echo ""
 
-  read -rp "Does this look right? Type 'confirmed' to generate files, anything else to abort: " confirm
+  # A-07: Per-domain confirmation — ask about each domain individually
+  local domain_comments=""
+  local inferred_domains
+  inferred_domains=$(echo "$inferred" | grep -iE "domain:?[[:space:]]+" | sed -E 's/.*domain:?[[:space:]]+//' | awk '{print $1}' | sort -u || true)
+
+  if [ -n "$inferred_domains" ]; then
+    echo "Review each domain before generating files:"
+    echo ""
+    while IFS= read -r d; do
+      [ -z "$d" ] && continue
+      local access_hint
+      access_hint=$(echo "$inferred" | grep -iA2 "domain:.*${d}" | grep -iE "access|level|permission" | head -1 | xargs || echo "(see structure above)")
+      echo -n "  Domain '${d}' (${access_hint}) — Accept? [Y/n/e(dit)]: "
+      read -r choice
+      case "$choice" in
+        [Nn])
+          echo "  → Skipping ${d}"
+          domain_comments="${domain_comments}\n- ${d}: SKIPPED by user"
+          ;;
+        [Ee])
+          echo -n "  New access level for ${d} [FROZEN/PARTIAL/FULL-SCOPE]: "
+          read -r new_level
+          domain_comments="${domain_comments}\n- ${d}: Changed to ${new_level}"
+          echo "  → Set ${d} to ${new_level}"
+          ;;
+        *)
+          echo "  → Accepted ${d}"
+          domain_comments="${domain_comments}\n- ${d}: Accepted"
+          ;;
+      esac
+    done <<< "$inferred_domains"
+    echo ""
+  fi
+
+  read -rp "Generate _agent/ files for accepted domains? Type 'confirmed' to proceed: " confirm
 
   if [ "$confirm" != "confirmed" ]; then
     log "Aborted. The inferred structure is saved at ${infer_out} if you want to edit and retry."
@@ -1047,8 +1152,10 @@ EOF
 ## Inferred Structure
 ${inferred}
 
+## Per-domain confirmations
+$(echo -e "$domain_comments")
+
 ## Notes
-- Confirmed by user at adopt time
 - Run 'agent-safe adopt --revisit' to review and change domain access levels
 DECISIONS_EOF
   log "Adoption decisions saved to ${decisions_file}"
@@ -1420,11 +1527,11 @@ cmd_verify_diff() {
     exit 1
   fi
 
-  # Get staged and unstaged changes
-  local diff_output
-  diff_output=$(git diff --name-only 2>/dev/null; git diff --cached --name-only 2>/dev/null | sort -u)
+  # Get list of changed files
+  local diff_files
+  diff_files=$(git diff --name-only 2>/dev/null; git diff --cached --name-only 2>/dev/null | sort -u)
 
-  if [ -z "$diff_output" ]; then
+  if [ -z "$diff_files" ]; then
     log_success "No uncommitted changes found. Nothing to verify."
     return 0
   fi
@@ -1439,41 +1546,75 @@ cmd_verify_diff() {
   while IFS= read -r changed_file; do
     [ -z "$changed_file" ] && continue
 
-    # Extract @agent tags for functions in this file
     local tags_in_file
     tags_in_file=$(grep -n "@agent:" "$changed_file" 2>/dev/null || true)
-
     if [ -z "$tags_in_file" ]; then
-      continue  # No tags, no restrictions
+      continue
     fi
 
-    # Get the diff for this file
+    # Get the unified diff for this file
     local file_diff
     file_diff=$(git diff -- "$changed_file" 2>/dev/null; git diff --cached -- "$changed_file" 2>/dev/null)
 
-    # Check if any FROZEN or PARTIAL tagged lines are in the diff
+    # Parse the diff body: walk hunk headers and +/- lines to find
+    # which new-side line numbers are affected by additions.
+    # Hunk header: @@ -old_start,old_count +new_start,new_count @@
+    local changed_lines=""
+    local new_line=0
+
+    while IFS= read -r diff_line; do
+      # Match hunk header to reset line counter
+      if [[ "$diff_line" =~ ^@@\ -[0-9]+(,[0-9]*)?\ \+([0-9]+)(,[0-9]*)?\ @@ ]]; then
+        new_line=${BASH_REMATCH[2]}
+      # Added line — record it and advance
+      elif [[ "$diff_line" =~ ^\+ ]] && [[ ! "$diff_line" =~ ^\+\+\+ ]]; then
+        changed_lines="${changed_lines} ${new_line}"
+        new_line=$((new_line + 1))
+      # Removed line — record the line that was removed (old-side context shifts)
+      elif [[ "$diff_line" =~ ^\- ]] && [[ ! "$diff_line" =~ ^\-\-\- ]]; then
+        # A deletion at this new-side position
+        changed_lines="${changed_lines} ${new_line}"
+        # Don't advance new_line — deletions don't exist on new side
+      # Context line — advance
+      elif [[ "$diff_line" =~ ^[[:space:]] ]] || [ -z "$diff_line" ]; then
+        new_line=$((new_line + 1))
+      fi
+    done <<< "$file_diff"
+
+    if [ -z "$changed_lines" ]; then
+      continue
+    fi
+
+    # Sort and deduplicate changed line numbers
+    changed_lines=$(echo "$changed_lines" | tr ' ' '\n' | sort -n | uniq | tr '\n' ' ')
+
+    # Check each FROZEN/PARTIAL tag against the changed lines
     while IFS= read -r tag_line; do
+      [ -z "$tag_line" ] && continue
       local line_num
       line_num=$(echo "$tag_line" | cut -d: -f1)
       local tag_type
       tag_type=$(echo "$tag_line" | sed -E 's/.*@agent:[[:space:]]*(FROZEN|PARTIAL|FULL-SCOPE).*/\1/' | head -1)
 
       if [ "$tag_type" = "FROZEN" ] || [ "$tag_type" = "PARTIAL" ]; then
-        # Check if changes are near this tagged line (within 20 lines)
-        local near_changes=false
-        local start_line=$((line_num - 20))
-        local end_line=$((line_num + 20))
-        if echo "$file_diff" | grep -q "^@@.*+${start_line},${end_line}" 2>/dev/null || \
-           echo "$file_diff" | awk "/^@@/{s=0} /^@@.*[+-]${line_num}/{s=1} s" | grep -q .; then
-          near_changes=true
-        fi
-        if [ "$near_changes" = true ]; then
+        # Tag sits on the line above the function; check tag line through
+        # function body (next 40 lines as approximation)
+        local tag_end=$((line_num + 40))
+        local hit=false
+        for cl in $changed_lines; do
+          [ -z "$cl" ] && continue
+          if [ "$cl" -ge "$line_num" ] 2>/dev/null && [ "$cl" -le "$tag_end" ] 2>/dev/null; then
+            hit=true
+            break
+          fi
+        done
+        if [ "$hit" = true ]; then
           echo -e "  ${RED}VIOLATION${NC}: ${tag_type} function at ${changed_file}:${line_num}"
           violations=$((violations + 1))
         fi
       fi
     done <<< "$tags_in_file"
-  done <<< "$diff_output"
+  done <<< "$diff_files"
 
   echo ""
   if [ "$violations" -eq 0 ]; then
