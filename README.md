@@ -91,8 +91,31 @@ agent-safe start backend auth.php "Add rate limiting" --skill webapp-testing,mcp
 | `skill suggest` | AI recommends skills based on your README |
 | `skill list` | Show installed skills |
 | `skill remove <name>` | Uninstall a skill |
+| `test unit` | Generate unit tests for a function (TS-01) |
+| `test integration` | Generate integration tests for a domain (TS-02) |
+| `test coverage` | Report test coverage gaps (TS-03) |
+| `test regression` | Run regression check before session (TS-04) |
 
 Skills are cached locally in `skills/`. Use `--force` to re-fetch, `--branch` to pick a branch.
+
+## Test Commands
+
+Generate tests, check coverage, and run regression checks before sessions. All commands print a prompt you paste into your AI session.
+
+```bash
+# TS-01: Generate unit tests for specific functions
+agent-safe test unit backend auth.php "addUser, validateToken"
+agent-safe test unit backend auth.php "addUser" --skill webapp-testing
+
+# TS-02: Generate integration tests for a domain
+agent-safe test integration backend
+
+# TS-03: Get a test coverage report (read-only analysis)
+agent-safe test coverage backend
+
+# TS-04: Run regression check before starting a session
+agent-safe test regression backend auth.php
+```
 
 ---
 

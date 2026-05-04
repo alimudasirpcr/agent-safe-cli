@@ -107,6 +107,10 @@ Commands:
   review diff [DOMAIN]             Explain git diff in plain English (RV-02)
   review feedback [DOMAIN]         Address reviewer blockers only (RV-03)
   review summary [DOMAIN] "GOAL"   Generate pre-review summary (RV-04)
+  test unit [DOMAIN] [FILE] "FN"  Generate unit tests for a function (TS-01)
+  test integration [DOMAIN]        Generate integration tests for a domain (TS-02)
+  test coverage [DOMAIN]           Report test coverage gaps (TS-03)
+  test regression [DOMAIN] [FILE] Run regression check before session (TS-04)
   skill add <name|url>             Install a skill from official registry or GitHub
        --skill NAME                Specify skill name (for GitHub repo URLs)
        --branch BRANCH             Specify branch (default: main)
@@ -2568,6 +2572,280 @@ cmd_review_summary() {
 }
 
 # ============================================================================
+# Test commands
+# ============================================================================
+
+cmd_test_unit() {
+  local domain="" file="" functions="${1:-}"
+
+  # Parse args: [DOMAIN] [FILE] "FUNCTIONS" or auto-detect
+  if [ -d "_agent/$1" ]; then
+    domain="$1"
+    shift || true
+  fi
+  if [ $# -ge 1 ] && [ -f "$1" ]; then
+    file="$1"
+    shift || true
+  fi
+  if [ $# -ge 1 ]; then
+    functions="$1"
+    shift || true
+  fi
+
+  # Auto-detect domain
+  if [ -z "$domain" ]; then
+    if [ -f "_agent/MASTER-PROGRESS.md" ]; then
+      domain=$(grep -iE "ACTIVE_DOMAIN:?[[:space:]]*" _agent/MASTER-PROGRESS.md | head -1 \
+        | sed -E 's/.*ACTIVE_DOMAIN:?[[:space:]]*//' | xargs || echo "")
+    fi
+    local available_domains
+    available_domains=$(find _agent -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sed 's|_agent/||' | sort)
+    if [ -z "$domain" ] && [ "$(echo "$available_domains" | wc -l | xargs)" -eq 1 ]; then
+      domain="$available_domains"
+    fi
+    if [ -n "$domain" ]; then
+      log "Auto-detected domain: ${domain}"
+    else
+      log_error "Could not auto-detect domain. Usage: agent-safe test unit [DOMAIN] [FILE] \"FUNCTIONS\""
+      exit 1
+    fi
+  fi
+
+  # Auto-detect file
+  if [ -z "$file" ]; then
+    if [ -f "_agent/${domain}/SCOPE.md" ]; then
+      file=$(grep -iE "(source|src|file):?[[:space:]]*" "_agent/${domain}/SCOPE.md" 2>/dev/null | head -1 \
+        | sed -E 's/.*(source|src|file):?[[:space:]]*//' | xargs || echo "")
+    fi
+    if [ -z "$file" ]; then
+      file="."
+    fi
+  fi
+
+  # Auto-detect functions from @agent tags if not provided
+  if [ -z "$functions" ]; then
+    functions=$(grep -rh "@agent:" --include="*.ts" --include="*.js" --include="*.py" --include="*.php" --include="*.java" --include="*.go" . 2>/dev/null \
+      | sed -E 's/.*@agent:[[:space:]]*(FROZEN|PARTIAL|FULL-SCOPE)[[:space:]]*[-—]?[[:space:]]*//' \
+      | head -20 | tr '\n' ', ' | sed 's/,$//' || echo "")
+    if [ -n "$functions" ]; then
+      log "Auto-detected functions from @agent tags"
+    else
+      log_warn "No functions specified and none auto-detected. Pass them: agent-safe test unit DOMAIN FILE \"func1, func2\""
+      functions="(all functions in file)"
+    fi
+  fi
+
+  local rules_file="_agent/${domain}/INSTRUCTIONS.summary.md"
+  local scope_file="_agent/${domain}/SCOPE.md"
+  [ ! -f "$rules_file" ] && rules_file="_agent/MASTER-INSTRUCTIONS.md"
+  [ ! -f "$scope_file" ] && scope_file="_agent/MASTER-SCOPE.md"
+
+  echo ""
+  echo -e "${BOLD}═══ Unit Test Generator (TS-01) ═══${NC}"
+  echo ""
+  local prompt
+  prompt=$(load_prompt test-unit "DOMAIN=${domain}" "FILE=${file}" "FUNCTIONS=${functions}" "RULES_FILE=${rules_file}" "SCOPE_FILE=${scope_file}")
+
+  if [ -n "${SKILL_NAMES:-}" ]; then
+    prompt=$(inject_skills "$prompt" "$SKILL_NAMES")
+  fi
+
+  echo "$prompt"
+  echo ""
+  echo -e "${BOLD}═══════════════════════════════════════════════${NC}"
+  echo ""
+
+  if command -v pbcopy &>/dev/null || command -v clip &>/dev/null || command -v xclip &>/dev/null; then
+    echo -n "Copy to clipboard? [y/N] "
+    read -r answer
+    if [[ "$answer" =~ ^[Yy]$ ]]; then
+      if command -v pbcopy &>/dev/null; then echo "$prompt" | pbcopy
+      elif command -v clip &>/dev/null; then echo "$prompt" | clip
+      elif command -v xclip &>/dev/null; then echo "$prompt" | xclip -selection clipboard; fi
+      log_success "Copied to clipboard."
+    fi
+  fi
+}
+
+cmd_test_integration() {
+  local domain="${1:-}"
+
+  if [ -z "$domain" ] || [ ! -d "_agent/$domain" ]; then
+    if [ -f "_agent/MASTER-PROGRESS.md" ]; then
+      domain=$(grep -iE "ACTIVE_DOMAIN:?[[:space:]]*" _agent/MASTER-PROGRESS.md | head -1 \
+        | sed -E 's/.*ACTIVE_DOMAIN:?[[:space:]]*//' | xargs || echo "")
+    fi
+    local available_domains
+    available_domains=$(find _agent -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sed 's|_agent/||' | sort)
+    if [ -z "$domain" ] && [ "$(echo "$available_domains" | wc -l | xargs)" -eq 1 ]; then
+      domain="$available_domains"
+    fi
+    if [ -n "$domain" ]; then
+      log "Auto-detected domain: ${domain}"
+    else
+      log_error "Could not auto-detect domain. Usage: agent-safe test integration [DOMAIN]"
+      exit 1
+    fi
+  fi
+
+  local rules_file="_agent/${domain}/INSTRUCTIONS.summary.md"
+  local scope_file="_agent/${domain}/SCOPE.md"
+  [ ! -f "$rules_file" ] && rules_file="_agent/MASTER-INSTRUCTIONS.md"
+  [ ! -f "$scope_file" ] && scope_file="_agent/MASTER-SCOPE.md"
+
+  echo ""
+  echo -e "${BOLD}═══ Integration Test Generator (TS-02) ═══${NC}"
+  echo ""
+  local prompt
+  prompt=$(load_prompt test-integration "DOMAIN=${domain}" "RULES_FILE=${rules_file}" "SCOPE_FILE=${scope_file}")
+
+  if [ -n "${SKILL_NAMES:-}" ]; then
+    prompt=$(inject_skills "$prompt" "$SKILL_NAMES")
+  fi
+
+  echo "$prompt"
+  echo ""
+  echo -e "${BOLD}═══════════════════════════════════════════════${NC}"
+  echo ""
+
+  if command -v pbcopy &>/dev/null || command -v clip &>/dev/null || command -v xclip &>/dev/null; then
+    echo -n "Copy to clipboard? [y/N] "
+    read -r answer
+    if [[ "$answer" =~ ^[Yy]$ ]]; then
+      if command -v pbcopy &>/dev/null; then echo "$prompt" | pbcopy
+      elif command -v clip &>/dev/null; then echo "$prompt" | clip
+      elif command -v xclip &>/dev/null; then echo "$prompt" | xclip -selection clipboard; fi
+      log_success "Copied to clipboard."
+    fi
+  fi
+}
+
+cmd_test_coverage() {
+  local domain="${1:-}"
+
+  if [ -z "$domain" ] || [ ! -d "_agent/$domain" ]; then
+    if [ -f "_agent/MASTER-PROGRESS.md" ]; then
+      domain=$(grep -iE "ACTIVE_DOMAIN:?[[:space:]]*" _agent/MASTER-PROGRESS.md | head -1 \
+        | sed -E 's/.*ACTIVE_DOMAIN:?[[:space:]]*//' | xargs || echo "")
+    fi
+    local available_domains
+    available_domains=$(find _agent -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sed 's|_agent/||' | sort)
+    if [ -z "$domain" ] && [ "$(echo "$available_domains" | wc -l | xargs)" -eq 1 ]; then
+      domain="$available_domains"
+    fi
+    if [ -n "$domain" ]; then
+      log "Auto-detected domain: ${domain}"
+    else
+      log_error "Could not auto-detect domain. Usage: agent-safe test coverage [DOMAIN]"
+      exit 1
+    fi
+  fi
+
+  local scope_file="_agent/${domain}/SCOPE.md"
+  [ ! -f "$scope_file" ] && scope_file="_agent/MASTER-SCOPE.md"
+
+  echo ""
+  echo -e "${BOLD}═══ Test Coverage Report (TS-03) ═══${NC}"
+  echo ""
+  local prompt
+  prompt=$(load_prompt test-coverage "DOMAIN=${domain}" "SCOPE_FILE=${scope_file}")
+
+  if [ -n "${SKILL_NAMES:-}" ]; then
+    prompt=$(inject_skills "$prompt" "$SKILL_NAMES")
+  fi
+
+  echo "$prompt"
+  echo ""
+  echo -e "${BOLD}═══════════════════════════════════════════════${NC}"
+  echo ""
+
+  if command -v pbcopy &>/dev/null || command -v clip &>/dev/null || command -v xclip &>/dev/null; then
+    echo -n "Copy to clipboard? [y/N] "
+    read -r answer
+    if [[ "$answer" =~ ^[Yy]$ ]]; then
+      if command -v pbcopy &>/dev/null; then echo "$prompt" | pbcopy
+      elif command -v clip &>/dev/null; then echo "$prompt" | clip
+      elif command -v xclip &>/dev/null; then echo "$prompt" | xclip -selection clipboard; fi
+      log_success "Copied to clipboard."
+    fi
+  fi
+}
+
+cmd_test_regression() {
+  local domain="" file="${1:-}"
+
+  if [ -d "_agent/$1" ]; then
+    domain="$1"
+    shift || true
+    file="${1:-.}"
+  elif [ $# -ge 1 ]; then
+    file="$1"
+    shift || true
+  fi
+
+  if [ -z "$domain" ]; then
+    if [ -f "_agent/MASTER-PROGRESS.md" ]; then
+      domain=$(grep -iE "ACTIVE_DOMAIN:?[[:space:]]*" _agent/MASTER-PROGRESS.md | head -1 \
+        | sed -E 's/.*ACTIVE_DOMAIN:?[[:space:]]*//' | xargs || echo "")
+    fi
+    local available_domains
+    available_domains=$(find _agent -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sed 's|_agent/||' | sort)
+    if [ -z "$domain" ] && [ "$(echo "$available_domains" | wc -l | xargs)" -eq 1 ]; then
+      domain="$available_domains"
+    fi
+    if [ -n "$domain" ]; then
+      log "Auto-detected domain: ${domain}"
+    else
+      log_error "Could not auto-detect domain. Usage: agent-safe test regression [DOMAIN] [FILE]"
+      exit 1
+    fi
+  fi
+
+  [ -z "$file" ] && file="."
+
+  echo ""
+  echo -e "${BOLD}═══ Regression Check (TS-04) ═══${NC}"
+  echo ""
+  local prompt
+  prompt=$(load_prompt test-regression "DOMAIN=${domain}" "FILE=${file}")
+
+  if [ -n "${SKILL_NAMES:-}" ]; then
+    prompt=$(inject_skills "$prompt" "$SKILL_NAMES")
+  fi
+
+  echo "$prompt"
+  echo ""
+  echo -e "${BOLD}═══════════════════════════════════════════════${NC}"
+  echo ""
+
+  if command -v pbcopy &>/dev/null || command -v clip &>/dev/null || command -v xclip &>/dev/null; then
+    echo -n "Copy to clipboard? [y/N] "
+    read -r answer
+    if [[ "$answer" =~ ^[Yy]$ ]]; then
+      if command -v pbcopy &>/dev/null; then echo "$prompt" | pbcopy
+      elif command -v clip &>/dev/null; then echo "$prompt" | clip
+      elif command -v xclip &>/dev/null; then echo "$prompt" | xclip -selection clipboard; fi
+      log_success "Copied to clipboard."
+    fi
+  fi
+}
+
+cmd_test() {
+  local test_subcmd="${1:-}"
+  shift || true
+
+  case "$test_subcmd" in
+    unit)        cmd_test_unit "$@" ;;
+    integration)  cmd_test_integration "$@" ;;
+    coverage)    cmd_test_coverage "$@" ;;
+    regression)  cmd_test_regression "$@" ;;
+    *)           log_error "Unknown test subcommand: ${test_subcmd:-none}"
+                 log_error "Usage: agent-safe test <unit|integration|coverage|regression>"
+                 exit 1 ;;
+  esac
+}
+
+# ============================================================================
 # Skill management commands
 # ============================================================================
 
@@ -3073,7 +3351,7 @@ while [ $# -gt 0 ]; do
     --multi-domain)
       # Next arg is a domain list only if it contains a comma or is "all".
       # Known subcommands (init, adopt, tag, verify, start) are NOT domain lists.
-      if [ $# -gt 1 ] && [[ "$2" != -* ]] && [[ "$2" != @(init|adopt|tag|verify|start|continue|recover|end|end-progress|review|skill) ]]; then
+      if [ $# -gt 1 ] && [[ "$2" != -* ]] && [[ "$2" != @(init|adopt|tag|verify|start|continue|recover|end|end-progress|review|skill|test) ]]; then
         MULTI_DOMAIN="$2"; shift 2
       else
         MULTI_DOMAIN="all"; shift
@@ -3129,6 +3407,20 @@ case "$SUBCOMMAND" in
       summary)   cmd_review_summary "${REMAINING[@]+"${REMAINING[@]}"}" ;;
       *) log_error "Unknown review subcommand: ${REVIEW_SUB:-none}"
          log_error "Usage: agent-safe review <checklist|diff|feedback|summary>"
+         exit 1 ;;
+    esac
+    ;;
+  test)
+    # test has sub-commands: unit, integration, coverage, regression
+    TEST_SUB="${REMAINING[0]:-}"
+    [ -n "$TEST_SUB" ] && unset 'REMAINING[0]'
+    case "$TEST_SUB" in
+      unit)        cmd_test_unit "${REMAINING[@]+"${REMAINING[@]}"}" ;;
+      integration) cmd_test_integration "${REMAINING[@]+"${REMAINING[@]}"}" ;;
+      coverage)    cmd_test_coverage "${REMAINING[@]+"${REMAINING[@]}"}" ;;
+      regression)  cmd_test_regression "${REMAINING[@]+"${REMAINING[@]}"}" ;;
+      *) log_error "Unknown test subcommand: ${TEST_SUB:-none}"
+         log_error "Usage: agent-safe test <unit|integration|coverage|regression>"
          exit 1 ;;
     esac
     ;;
