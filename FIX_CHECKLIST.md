@@ -77,12 +77,12 @@ Single source of truth for issues raised in the critical review. An agent should
 
 ## P2 — High Architecture (the "trust" claim depends on these)
 
-### [ ] A-01 Add real enforcement: post-session diff vs tags
+### [x] A-01 Add real enforcement: post-session diff vs tags
 - **Why:** The whole pitch is "boundaries the AI respects." Today they're advisory text. A `verify-diff` step gives real teeth.
 - **Fix:** New subcommand `agent-safe verify-diff [domain]` that runs after a session: take `git diff`, parse it for hunks touching functions tagged `FROZEN`/`PARTIAL` (in the pre-session source), and exit non-zero with a list of violations. Wire it into `end` so by default a session can't be "ended" if it broke a boundary; allow `--force` with a logged justification.
 - **Verify:** Manually edit a `FROZEN` function, run `end`, and the command refuses with a clear violation list.
 
-### [x] A-02 Optional pre-commit hook to block boundary violations
+### [x] A-01 Add real enforcement: verify-diff + pre-commit hook
 - **Why:** `verify-diff` only runs when the user remembers. A pre-commit hook makes it ambient.
 - **Fix:** New subcommand `agent-safe install-hooks` that drops a `.git/hooks/pre-commit` invoking `agent-safe verify-diff`. Document it in README.
 - **Verify:** With the hook installed, `git commit` fails when a FROZEN function changed.
