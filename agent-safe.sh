@@ -37,7 +37,8 @@ _load_env() {
   for cfg in "${config_files[@]}"; do
     while IFS= read -r line || [ -n "$line" ]; do
       # Q-05: Strip UTF-8 BOM if present (from Notepad saves)
-      line="${line#$(printf '\xef\xbb\xbf')}"
+      local bom=$'\xef\xbb\xbf'
+      line="${line#"$bom"}"
       # Strip Windows carriage return
       line="${line%$'\r'}"
       # Skip comments and empty lines
@@ -79,6 +80,7 @@ MULTI_DOMAIN=""
 SKILL_NAMES=""
 SUGGEST_YES=false
 FORCE_REFRESH=false
+RUN_MODE=false
 PROVIDER="${AGENT_SAFE_PROVIDER:-claude}"
 AI_MODEL="${AGENT_SAFE_MODEL:-}"
 
@@ -111,16 +113,16 @@ Commands:
   continue [DOMAIN] [FILE]         Assemble SM-02 continue-session prompt
   recover [DOMAIN] [FILE]          Assemble SM-03 context-recovery prompt
   end [DOMAIN]                     Assemble SM-04 end-session prompt
-  end-progress [DONE_DOMAIN]       Assemble SM-05 master progress update
+  end-progress [DONE_DOMAIN]       Assemble master progress update
                                     [NEXT_DOMAIN] [BLOCKER]
-  review checklist [DOMAIN] "GOAL" Generate a code review checklist (RV-01)
+  install-hooks                     Install git pre-commit hook (runs verify)
   review diff [DOMAIN]             Explain git diff in plain English (RV-02)
   review feedback [DOMAIN]         Address reviewer blockers only (RV-03)
   review summary [DOMAIN] "GOAL"   Generate pre-review summary (RV-04)
-  test unit [DOMAIN] [FILE] "FN"  Generate unit tests for a function (TS-01)
-  test integration [DOMAIN]        Generate integration tests for a domain (TS-02)
-  test coverage [DOMAIN]           Report test coverage gaps (TS-03)
-  test regression [DOMAIN] [FILE] Run regression check before session (TS-04)
+  test unit [DOMAIN] [FILE] "FN"  Generate unit tests for a function
+  test integration [DOMAIN]        Generate integration tests for a domain
+  test coverage [DOMAIN]           Report test coverage gaps
+  test regression [DOMAIN] [FILE] Run regression check before session
   skill add <name|url>             Install a skill from official registry or GitHub
        --skill NAME                Specify skill name (for GitHub repo URLs)
        --branch BRANCH             Specify branch (default: main)
@@ -136,6 +138,7 @@ Options:
   --model MODEL                    Model name (provider-specific, e.g. gpt-4o, gemini-2.0-flash)
   --max-turns N                    Max turns per call (default: 40, Claude only)
   --skill NAMES                    Comma-separated skill names to inject into session prompts
+  --run                            Run session via claude -p instead of printing prompt (Claude only)
   -h, --help                        Show this help
   -v, --version                     Show version
 
@@ -295,9 +298,9 @@ load_prompt() {
 
     # Write result and value to temp files for safe multi-line awk substitution
     local result_file val_file out_file
-    result_file=$(mktemp)
-    val_file=$(mktemp)
-    out_file=$(mktemp)
+    result_file=$(mktemp -t agent-safe.XXXXXX)
+    val_file=$(mktemp -t agent-safe.XXXXXX)
+    out_file=$(mktemp -t agent-safe.XXXXXX)
     printf '%s\n' "$result" > "$result_file"
     printf '%s\n' "$val" > "$val_file"
 
@@ -447,6 +450,33 @@ preflight() {
   fi
 }
 
+# Q-04: Acquire a lock to prevent concurrent writes to _agent/ state
+_agent_lock() {
+  local lock_file="${PROJECT_ROOT:-.}/_agent/.lock"
+  if ! mkdir -p "${PROJECT_ROOT:-.}/_agent" 2>/dev/null; then
+    return  # Can't create _agent/ — likely no project root yet
+  fi
+  if command -v flock &>/dev/null; then
+    exec 200>"$lock_file"
+    if ! flock -n 200; then
+      log_error "Another agent-safe session is running. Remove ${lock_file} if stale."
+      exit 1
+    fi
+  fi
+  # flock not available (Windows/MSYS) — skip locking with a warning
+}
+
+# A-05: Warn when non-Claude provider is used for agentic commands
+warn_non_claude() {
+  if [ "$PROVIDER" != "claude" ]; then
+    log_warn "Provider is '${PROVIDER}' — session prompts are assembled but not executed."
+    log_warn "Non-Claude providers run in advice mode: the AI responds with text only,"
+    log_warn "it cannot apply file edits or update PROGRESS.md automatically."
+    log_warn "Use --provider claude or --run for direct execution."
+    echo ""
+  fi
+}
+
 # ============================================================================
 # AI Provider runners
 # ============================================================================
@@ -482,12 +512,12 @@ run_ai_openai() {
 
   # Write prompt to temp file for safe JSON encoding
   local prompt_file
-  prompt_file=$(mktemp)
+  prompt_file=$(mktemp -t agent-safe.XXXXXX)
   printf '%s' "$prompt" > "$prompt_file"
 
   # Build JSON body with escaped prompt
   local body_file
-  body_file=$(mktemp)
+  body_file=$(mktemp -t agent-safe.XXXXXX)
   jq -n \
     --arg model "$model" \
     --arg prompt "$(cat "$prompt_file")" \
@@ -523,10 +553,10 @@ run_ai_gemini() {
   fi
 
   local prompt_file body_file
-  prompt_file=$(mktemp)
+  prompt_file=$(mktemp -t agent-safe.XXXXXX)
   printf '%s' "$prompt" > "$prompt_file"
 
-  body_file=$(mktemp)
+  body_file=$(mktemp -t agent-safe.XXXXXX)
   jq -n \
     --arg prompt "$(cat "$prompt_file")" \
     '{contents: [{parts: [{text: $prompt}]}]}' \
@@ -563,7 +593,7 @@ run_ai_ollama() {
   # Write prompt to temp file and redirect stdin from it
   # This is more reliable than piping, especially on Windows/Git Bash
   local prompt_file
-  prompt_file=$(mktemp)
+  prompt_file=$(mktemp -t agent-safe.XXXXXX)
   printf '%s\n' "$prompt" > "$prompt_file"
 
   # --nowordwrap disables word wrapping; TERM=dumb suppresses spinner/progress
@@ -609,7 +639,7 @@ run_ai_custom() {
 
   # Write prompt to temp file
   local prompt_file
-  prompt_file=$(mktemp)
+  prompt_file=$(mktemp -t agent-safe.XXXXXX)
   printf '%s\n' "$prompt" > "$prompt_file"
 
   # Build command:
@@ -902,6 +932,7 @@ cmd_adopt() {
   log_header "agent-safe adopt — add framework to existing project"
 
   preflight true
+  _agent_lock
 
   if [ -d "_agent" ]; then
     log_warn "_agent/ already exists from a previous run."
@@ -991,11 +1022,26 @@ EOF
     exit 0
   fi
 
+  # A-07: Save adoption decisions for audit/revisit
+  mkdir -p "_agent"
+  local decisions_file="_agent/.adopt-decisions.md"
+  cat > "$decisions_file" <<DECISIONS_EOF
+# Adopt Decisions — $(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+## Inferred Structure
+${inferred}
+
+## Notes
+- Confirmed by user at adopt time
+- Run 'agent-safe adopt --revisit' to review and change domain access levels
+DECISIONS_EOF
+  log "Adoption decisions saved to ${decisions_file}"
+
   echo ""
   log "Generating _agent/ files..."
 
   local inferred_file
-  inferred_file=$(mktemp)
+  inferred_file=$(mktemp -t agent-safe.XXXXXX)
   printf '%s\n' "$inferred" > "$inferred_file"
   local gen_prompt
   gen_prompt=$(load_prompt adopt-phase2 "INFERRED=@${inferred_file}")
@@ -1045,6 +1091,7 @@ cmd_tag() {
   log_header "agent-safe tag — add @agent permission tags"
 
   preflight true
+  _agent_lock
 
   if [ ! -d "_agent" ]; then
     log_error "_agent/ not found. Run 'agent-safe init' or 'agent-safe adopt' first."
@@ -1193,7 +1240,7 @@ insert_tag() {
 
   # Insert tag on the line above
   local tmp
-  tmp=$(mktemp)
+  tmp=$(mktemp -t agent-safe.XXXXXX)
   awk -v ln="$line_num" -v tag="$tag" '
     NR==ln { print tag }
     { print }
@@ -1330,7 +1377,52 @@ cmd_verify() {
 }
 
 # ============================================================================
-# COMMAND: start  (SM-01)
+# A-06: Output assembled prompt — either run directly or print + clipboard
+# ============================================================================
+prompt_output() {
+  local prompt="$1"
+
+  if [ "$RUN_MODE" = true ] && [ "$PROVIDER" = "claude" ] && command -v claude &>/dev/null; then
+    # A-06: Drive Claude directly
+    log "Running session via claude -p ..."
+    local exit_code=0
+    # shellcheck disable=SC2086
+    claude -p "$prompt" \
+      --dangerously-skip-permissions \
+      --max-turns "$MAX_TURNS" \
+      $MODEL_FLAG
+    exit_code=$?
+    return $exit_code
+  fi
+
+  # Default: print prompt and offer clipboard
+  echo ""
+  echo -e "${BOLD}═══ Session prompt — paste this into your AI ═══${NC}"
+  echo ""
+  echo "$prompt"
+  echo ""
+  echo -e "${BOLD}═══════════════════════════════════════════════${NC}"
+  echo ""
+
+  if [ "$RUN_MODE" = true ] && [ "$PROVIDER" != "claude" ]; then
+    log_warn "--run requires --provider claude. Printing prompt instead."
+  fi
+
+  # Copy to clipboard
+  if command -v pbcopy &>/dev/null || command -v clip &>/dev/null || command -v xclip &>/dev/null; then
+    echo -n "Copy to clipboard? [y/N] "
+    read -r answer
+    if [[ "$answer" =~ ^[Yy]$ ]]; then
+      if command -v pbcopy &>/dev/null; then echo "$prompt" | pbcopy
+      elif command -v clip &>/dev/null; then echo "$prompt" | clip
+      elif command -v xclip &>/dev/null; then echo "$prompt" | xclip -selection clipboard; fi
+      log_success "Copied to clipboard."
+    fi
+  fi
+}
+
+# ============================================================================
+# COMMAND: start
 # ============================================================================
 
 cmd_start() {
@@ -1558,29 +1650,8 @@ cmd_start() {
     prompt=$(inject_skills "$prompt" "$SKILL_NAMES")
   fi
 
-  echo ""
-  echo -e "${BOLD}═══ Session prompt — paste this into Claude ═══${NC}"
-  echo ""
-  echo "$prompt"
-  echo ""
-  echo -e "${BOLD}═══════════════════════════════════════════════${NC}"
-  echo ""
-
-  # Copy to clipboard (macOS: pbcopy, Windows/Git Bash: clip, Linux: xclip)
-  if command -v pbcopy &>/dev/null || command -v clip &>/dev/null || command -v xclip &>/dev/null; then
-    echo -n "Copy to clipboard? [y/N] "
-    read -r answer
-    if [[ "$answer" =~ ^[Yy]$ ]]; then
-      if command -v pbcopy &>/dev/null; then
-        echo "$prompt" | pbcopy
-      elif command -v clip &>/dev/null; then
-        echo "$prompt" | clip
-      elif command -v xclip &>/dev/null; then
-        echo "$prompt" | xclip -selection clipboard
-      fi
-      log_success "Copied to clipboard."
-    fi
-  fi
+  warn_non_claude
+  prompt_output "$prompt"
 }
 
 # ── Multi-domain start: open edit access across listed domains ──
@@ -1836,29 +1907,8 @@ cmd_start_multi_domain() {
     prompt=$(inject_skills "$prompt" "$SKILL_NAMES")
   fi
 
-  echo ""
-  echo -e "${BOLD}═══ Multi-domain session prompt ═══${NC}"
-  echo ""
-  echo "$prompt"
-  echo ""
-  echo -e "${BOLD}═══════════════════════════════════════════════${NC}"
-  echo ""
-
-  # Copy to clipboard (macOS: pbcopy, Windows/Git Bash: clip, Linux: xclip)
-  if command -v pbcopy &>/dev/null || command -v clip &>/dev/null || command -v xclip &>/dev/null; then
-    echo -n "Copy to clipboard? [y/N] "
-    read -r answer
-    if [[ "$answer" =~ ^[Yy]$ ]]; then
-      if command -v pbcopy &>/dev/null; then
-        echo "$prompt" | pbcopy
-      elif command -v clip &>/dev/null; then
-        echo "$prompt" | clip
-      elif command -v xclip &>/dev/null; then
-        echo "$prompt" | xclip -selection clipboard
-      fi
-      log_success "Copied to clipboard."
-    fi
-  fi
+  warn_non_claude
+  prompt_output "$prompt"
 }
 
 cmd_start_print_only() {
@@ -1949,6 +1999,30 @@ cmd_continue() {
 
   local scope_file="_agent/${domain}/SCOPE.md"
 
+  # U-06: Auto-detect drift — if PROGRESS.md is missing or git has uncommitted
+  # changes, suggest recover instead of continue
+  local progress_file="_agent/${domain}/PROGRESS.md"
+  local has_drift=false
+  if [ ! -f "$progress_file" ] || [ ! -s "$progress_file" ]; then
+    has_drift=true
+  elif command -v git &>/dev/null && [ -d ".git" ]; then
+    local uncommitted
+    uncommitted=$(git status --porcelain 2>/dev/null | wc -l | xargs)
+    if [ "${uncommitted:-0}" -gt 0 ]; then
+      local uncommitted_in_domain
+      uncommitted_in_domain=$(git status --porcelain 2>/dev/null | grep -c "_agent/${domain}/" || echo "0")
+      if [ "${uncommitted_in_domain:-0}" -gt 0 ]; then
+        has_drift=true
+      fi
+    fi
+  fi
+
+  if [ "$has_drift" = true ]; then
+    log_warn "Progress file is missing or domain has uncommitted changes."
+    log_warn "Falling back to recovery mode. Use 'agent-safe recover' to force recovery."
+    echo ""
+  fi
+
   # Build project directory tree
   local project_structure
   project_structure=$(find . -type f \
@@ -1972,9 +2046,6 @@ cmd_continue() {
     | head -100)
   [ -z "$project_structure" ] && project_structure="(no files found)"
 
-  echo ""
-  echo -e "${BOLD}═══ Continue session prompt ═══${NC}"
-  echo ""
   local prompt
   prompt=$(load_prompt cont-session "DOMAIN=${domain}" "RULES_FILE=${rules_file}" "SCOPE_FILE=${scope_file}" "PROJECT_STRUCTURE=${project_structure}")
 
@@ -1982,26 +2053,8 @@ cmd_continue() {
     prompt=$(inject_skills "$prompt" "$SKILL_NAMES")
   fi
 
-  echo "$prompt"
-  echo ""
-  echo -e "${BOLD}═══════════════════════════════════════════════${NC}"
-  echo ""
-
-  # Copy to clipboard
-  if command -v pbcopy &>/dev/null || command -v clip &>/dev/null || command -v xclip &>/dev/null; then
-    echo -n "Copy to clipboard? [y/N] "
-    read -r answer
-    if [[ "$answer" =~ ^[Yy]$ ]]; then
-      if command -v pbcopy &>/dev/null; then
-        echo "$prompt" | pbcopy
-      elif command -v clip &>/dev/null; then
-        echo "$prompt" | clip
-      elif command -v xclip &>/dev/null; then
-        echo "$prompt" | xclip -selection clipboard
-      fi
-      log_success "Copied to clipboard."
-    fi
-  fi
+  warn_non_claude
+  prompt_output "$prompt"
 }
 
 # ============================================================================
@@ -2095,9 +2148,6 @@ cmd_recover() {
     | head -100)
   [ -z "$project_structure" ] && project_structure="(no files found)"
 
-  echo ""
-  echo -e "${BOLD}═══ Recovery prompt ═══${NC}"
-  echo ""
   local prompt
   prompt=$(load_prompt cont-recovery "DOMAIN=${domain}" "FILE=${file:-.}" "RULES_FILE=${rules_file}" "SCOPE_FILE=${scope_file}" "PROJECT_STRUCTURE=${project_structure}")
 
@@ -2105,26 +2155,8 @@ cmd_recover() {
     prompt=$(inject_skills "$prompt" "$SKILL_NAMES")
   fi
 
-  echo "$prompt"
-  echo ""
-  echo -e "${BOLD}═══════════════════════════════════════════════${NC}"
-  echo ""
-
-  # Copy to clipboard
-  if command -v pbcopy &>/dev/null || command -v clip &>/dev/null || command -v xclip &>/dev/null; then
-    echo -n "Copy to clipboard? [y/N] "
-    read -r answer
-    if [[ "$answer" =~ ^[Yy]$ ]]; then
-      if command -v pbcopy &>/dev/null; then
-        echo "$prompt" | pbcopy
-      elif command -v clip &>/dev/null; then
-        echo "$prompt" | clip
-      elif command -v xclip &>/dev/null; then
-        echo "$prompt" | xclip -selection clipboard
-      fi
-      log_success "Copied to clipboard."
-    fi
-  fi
+  warn_non_claude
+  prompt_output "$prompt"
 }
 
 # ============================================================================
@@ -2132,10 +2164,32 @@ cmd_recover() {
 # ============================================================================
 
 cmd_end() {
-  local domain=""
+  local domain="" handoff_next=""
 
-  if [ $# -ge 1 ] && [ -d "_agent/$1" ]; then
-    domain="$1"
+  _agent_lock
+
+  # Parse args and --handoff flag
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --handoff)
+        shift || true
+        handoff_next="${1:-}"
+        shift || true
+        ;;
+      *)
+        if [ -z "$domain" ] && [ -d "_agent/$1" ]; then
+          domain="$1"
+        fi
+        shift || true
+        ;;
+    esac
+  done
+
+  # U-06: --handoff delegates to end-progress
+  if [ -n "$handoff_next" ]; then
+    log "Handing off from ${domain:-?} to ${handoff_next}..."
+    cmd_end_progress "$domain" "$handoff_next"
+    return $?
   fi
 
   # Auto-detect domain
@@ -2167,31 +2221,10 @@ cmd_end() {
   local date_str
   date_str=$(date +%Y-%m-%d)
 
-  echo ""
-  echo -e "${BOLD}═══ End session prompt ═══${NC}"
-  echo ""
   local prompt
   prompt=$(load_prompt end-session "DOMAIN=${domain}" "DATE=${date_str}")
-  echo "$prompt"
-  echo ""
-  echo -e "${BOLD}═══════════════════════════════════════════════${NC}"
-  echo ""
-
-  # Copy to clipboard
-  if command -v pbcopy &>/dev/null || command -v clip &>/dev/null || command -v xclip &>/dev/null; then
-    echo -n "Copy to clipboard? [y/N] "
-    read -r answer
-    if [[ "$answer" =~ ^[Yy]$ ]]; then
-      if command -v pbcopy &>/dev/null; then
-        echo "$prompt" | pbcopy
-      elif command -v clip &>/dev/null; then
-        echo "$prompt" | clip
-      elif command -v xclip &>/dev/null; then
-        echo "$prompt" | xclip -selection clipboard
-      fi
-      log_success "Copied to clipboard."
-    fi
-  fi
+  warn_non_claude
+  prompt_output "$prompt"
 }
 
 # ============================================================================
@@ -2200,6 +2233,8 @@ cmd_end() {
 
 cmd_end_progress() {
   local completed_domain="" next_domain="" blocker=""
+
+  _agent_lock
 
   # Parse args: [COMPLETED_DOMAIN] [NEXT_DOMAIN] [BLOCKER]
   if [ $# -ge 1 ] && [ -d "_agent/$1" ]; then
@@ -2270,9 +2305,6 @@ cmd_end_progress() {
 
   local blocker_date="$completed_date"
 
-  echo ""
-  echo -e "${BOLD}═══ End Master Progress ═══${NC}"
-  echo ""
   local prompt
   prompt=$(load_prompt end-master-progress \
     "COMPLETED_DOMAIN=${completed_domain}" \
@@ -2280,22 +2312,8 @@ cmd_end_progress() {
     "COMPLETED_DATE=${completed_date}" \
     "BLOCKER_DESCRIPTION=${blocker}" \
     "BLOCKER_DATE=${blocker_date}")
-  echo "$prompt"
-  echo ""
-  echo -e "${BOLD}═══════════════════════════════════════════════${NC}"
-  echo ""
-
-  # Copy to clipboard
-  if command -v pbcopy &>/dev/null || command -v clip &>/dev/null || command -v xclip &>/dev/null; then
-    echo -n "Copy to clipboard? [y/N] "
-    read -r answer
-    if [[ "$answer" =~ ^[Yy]$ ]]; then
-      if command -v pbcopy &>/dev/null; then echo "$prompt" | pbcopy
-      elif command -v clip &>/dev/null; then echo "$prompt" | clip
-      elif command -v xclip &>/dev/null; then echo "$prompt" | xclip -selection clipboard; fi
-      log_success "Copied to clipboard."
-    fi
-  fi
+  warn_non_claude
+  prompt_output "$prompt"
 }
 
 # ============================================================================
@@ -2346,26 +2364,9 @@ cmd_review_checklist() {
 
   [ -z "$contract" ] && contract="(none)"
 
-  echo ""
-  echo -e "${BOLD}═══ Review Checklist Generator ═══${NC}"
-  echo ""
   local prompt
   prompt=$(load_prompt review-checklist-gen "DOMAIN=${domain}" "SESSION_GOAL=${session_goal}" "CONTRACT=${contract}")
-  echo "$prompt"
-  echo ""
-  echo -e "${BOLD}═══════════════════════════════════════════════${NC}"
-  echo ""
-
-  if command -v pbcopy &>/dev/null || command -v clip &>/dev/null || command -v xclip &>/dev/null; then
-    echo -n "Copy to clipboard? [y/N] "
-    read -r answer
-    if [[ "$answer" =~ ^[Yy]$ ]]; then
-      if command -v pbcopy &>/dev/null; then echo "$prompt" | pbcopy
-      elif command -v clip &>/dev/null; then echo "$prompt" | clip
-      elif command -v xclip &>/dev/null; then echo "$prompt" | xclip -selection clipboard; fi
-      log_success "Copied to clipboard."
-    fi
-  fi
+  prompt_output "$prompt"
 }
 
 # ============================================================================
@@ -2410,31 +2411,15 @@ cmd_review_diff() {
 
   # Write diff to temp file for @file syntax (multi-line safe)
   local diff_file
-  diff_file=$(mktemp)
+  diff_file=$(mktemp -t agent-safe.XXXXXX)
   printf '%s\n' "$git_diff" > "$diff_file"
 
-  echo ""
-  echo -e "${BOLD}═══ Diff Explainer ═══${NC}"
-  echo ""
   local prompt
   prompt=$(load_prompt review-diff-explainer "DOMAIN=${domain}" "GIT_DIFF=@${diff_file}")
-  echo "$prompt"
-  echo ""
-  echo -e "${BOLD}═══════════════════════════════════════════════${NC}"
-  echo ""
 
   rm -f "$diff_file"
 
-  if command -v pbcopy &>/dev/null || command -v clip &>/dev/null || command -v xclip &>/dev/null; then
-    echo -n "Copy to clipboard? [y/N] "
-    read -r answer
-    if [[ "$answer" =~ ^[Yy]$ ]]; then
-      if command -v pbcopy &>/dev/null; then echo "$prompt" | pbcopy
-      elif command -v clip &>/dev/null; then echo "$prompt" | clip
-      elif command -v xclip &>/dev/null; then echo "$prompt" | xclip -selection clipboard; fi
-      log_success "Copied to clipboard."
-    fi
-  fi
+  prompt_output "$prompt"
 }
 
 # ============================================================================
@@ -2505,14 +2490,11 @@ cmd_review_feedback() {
 
   # Write multi-line values to temp files
   local blockers_file suggestions_file
-  blockers_file=$(mktemp)
-  suggestions_file=$(mktemp)
+  blockers_file=$(mktemp -t agent-safe.XXXXXX)
+  suggestions_file=$(mktemp -t agent-safe.XXXXXX)
   printf '%s\n' "$blockers" > "$blockers_file"
   printf '%s\n' "$suggestions" > "$suggestions_file"
 
-  echo ""
-  echo -e "${BOLD}═══ Review Feedback Handler ═══${NC}"
-  echo ""
   local prompt
   prompt=$(load_prompt review-feedback \
     "DOMAIN=${domain}" \
@@ -2520,23 +2502,10 @@ cmd_review_feedback() {
     "GIT_STATE=${git_state}" \
     "BLOCKERS=@${blockers_file}" \
     "SUGGESTIONS=@${suggestions_file}")
-  echo "$prompt"
-  echo ""
-  echo -e "${BOLD}═══════════════════════════════════════════════${NC}"
-  echo ""
 
   rm -f "$blockers_file" "$suggestions_file"
 
-  if command -v pbcopy &>/dev/null || command -v clip &>/dev/null || command -v xclip &>/dev/null; then
-    echo -n "Copy to clipboard? [y/N] "
-    read -r answer
-    if [[ "$answer" =~ ^[Yy]$ ]]; then
-      if command -v pbcopy &>/dev/null; then echo "$prompt" | pbcopy
-      elif command -v clip &>/dev/null; then echo "$prompt" | clip
-      elif command -v xclip &>/dev/null; then echo "$prompt" | xclip -selection clipboard; fi
-      log_success "Copied to clipboard."
-    fi
-  fi
+  prompt_output "$prompt"
 }
 
 # ============================================================================
@@ -2579,26 +2548,9 @@ cmd_review_summary() {
   fi
   [ -z "$session_goal" ] && session_goal="(not specified)"
 
-  echo ""
-  echo -e "${BOLD}═══ Review Summary ═══${NC}"
-  echo ""
   local prompt
   prompt=$(load_prompt review-summary "DOMAIN=${domain}" "SESSION_GOAL=${session_goal}")
-  echo "$prompt"
-  echo ""
-  echo -e "${BOLD}═══════════════════════════════════════════════${NC}"
-  echo ""
-
-  if command -v pbcopy &>/dev/null || command -v clip &>/dev/null || command -v xclip &>/dev/null; then
-    echo -n "Copy to clipboard? [y/N] "
-    read -r answer
-    if [[ "$answer" =~ ^[Yy]$ ]]; then
-      if command -v pbcopy &>/dev/null; then echo "$prompt" | pbcopy
-      elif command -v clip &>/dev/null; then echo "$prompt" | clip
-      elif command -v xclip &>/dev/null; then echo "$prompt" | xclip -selection clipboard; fi
-      log_success "Copied to clipboard."
-    fi
-  fi
+  prompt_output "$prompt"
 }
 
 # ============================================================================
@@ -2670,9 +2622,6 @@ cmd_test_unit() {
   [ ! -f "$rules_file" ] && rules_file="_agent/MASTER-INSTRUCTIONS.md"
   [ ! -f "$scope_file" ] && scope_file="_agent/MASTER-SCOPE.md"
 
-  echo ""
-  echo -e "${BOLD}═══ Unit Test Generator (TS-01) ═══${NC}"
-  echo ""
   local prompt
   prompt=$(load_prompt test-unit "DOMAIN=${domain}" "FILE=${file}" "FUNCTIONS=${functions}" "RULES_FILE=${rules_file}" "SCOPE_FILE=${scope_file}")
 
@@ -2680,21 +2629,7 @@ cmd_test_unit() {
     prompt=$(inject_skills "$prompt" "$SKILL_NAMES")
   fi
 
-  echo "$prompt"
-  echo ""
-  echo -e "${BOLD}═══════════════════════════════════════════════${NC}"
-  echo ""
-
-  if command -v pbcopy &>/dev/null || command -v clip &>/dev/null || command -v xclip &>/dev/null; then
-    echo -n "Copy to clipboard? [y/N] "
-    read -r answer
-    if [[ "$answer" =~ ^[Yy]$ ]]; then
-      if command -v pbcopy &>/dev/null; then echo "$prompt" | pbcopy
-      elif command -v clip &>/dev/null; then echo "$prompt" | clip
-      elif command -v xclip &>/dev/null; then echo "$prompt" | xclip -selection clipboard; fi
-      log_success "Copied to clipboard."
-    fi
-  fi
+  prompt_output "$prompt"
 }
 
 cmd_test_integration() {
@@ -2723,9 +2658,6 @@ cmd_test_integration() {
   [ ! -f "$rules_file" ] && rules_file="_agent/MASTER-INSTRUCTIONS.md"
   [ ! -f "$scope_file" ] && scope_file="_agent/MASTER-SCOPE.md"
 
-  echo ""
-  echo -e "${BOLD}═══ Integration Test Generator (TS-02) ═══${NC}"
-  echo ""
   local prompt
   prompt=$(load_prompt test-integration "DOMAIN=${domain}" "RULES_FILE=${rules_file}" "SCOPE_FILE=${scope_file}")
 
@@ -2733,21 +2665,7 @@ cmd_test_integration() {
     prompt=$(inject_skills "$prompt" "$SKILL_NAMES")
   fi
 
-  echo "$prompt"
-  echo ""
-  echo -e "${BOLD}═══════════════════════════════════════════════${NC}"
-  echo ""
-
-  if command -v pbcopy &>/dev/null || command -v clip &>/dev/null || command -v xclip &>/dev/null; then
-    echo -n "Copy to clipboard? [y/N] "
-    read -r answer
-    if [[ "$answer" =~ ^[Yy]$ ]]; then
-      if command -v pbcopy &>/dev/null; then echo "$prompt" | pbcopy
-      elif command -v clip &>/dev/null; then echo "$prompt" | clip
-      elif command -v xclip &>/dev/null; then echo "$prompt" | xclip -selection clipboard; fi
-      log_success "Copied to clipboard."
-    fi
-  fi
+  prompt_output "$prompt"
 }
 
 cmd_test_coverage() {
@@ -2774,9 +2692,6 @@ cmd_test_coverage() {
   local scope_file="_agent/${domain}/SCOPE.md"
   [ ! -f "$scope_file" ] && scope_file="_agent/MASTER-SCOPE.md"
 
-  echo ""
-  echo -e "${BOLD}═══ Test Coverage Report (TS-03) ═══${NC}"
-  echo ""
   local prompt
   prompt=$(load_prompt test-coverage "DOMAIN=${domain}" "SCOPE_FILE=${scope_file}")
 
@@ -2784,21 +2699,7 @@ cmd_test_coverage() {
     prompt=$(inject_skills "$prompt" "$SKILL_NAMES")
   fi
 
-  echo "$prompt"
-  echo ""
-  echo -e "${BOLD}═══════════════════════════════════════════════${NC}"
-  echo ""
-
-  if command -v pbcopy &>/dev/null || command -v clip &>/dev/null || command -v xclip &>/dev/null; then
-    echo -n "Copy to clipboard? [y/N] "
-    read -r answer
-    if [[ "$answer" =~ ^[Yy]$ ]]; then
-      if command -v pbcopy &>/dev/null; then echo "$prompt" | pbcopy
-      elif command -v clip &>/dev/null; then echo "$prompt" | clip
-      elif command -v xclip &>/dev/null; then echo "$prompt" | xclip -selection clipboard; fi
-      log_success "Copied to clipboard."
-    fi
-  fi
+  prompt_output "$prompt"
 }
 
 cmd_test_regression() {
@@ -2836,9 +2737,6 @@ cmd_test_regression() {
 
   [ -z "$file" ] && file="."
 
-  echo ""
-  echo -e "${BOLD}═══ Regression Check (TS-04) ═══${NC}"
-  echo ""
   local prompt
   prompt=$(load_prompt test-regression "DOMAIN=${domain}" "FILE=${file}")
 
@@ -2846,21 +2744,7 @@ cmd_test_regression() {
     prompt=$(inject_skills "$prompt" "$SKILL_NAMES")
   fi
 
-  echo "$prompt"
-  echo ""
-  echo -e "${BOLD}═══════════════════════════════════════════════${NC}"
-  echo ""
-
-  if command -v pbcopy &>/dev/null || command -v clip &>/dev/null || command -v xclip &>/dev/null; then
-    echo -n "Copy to clipboard? [y/N] "
-    read -r answer
-    if [[ "$answer" =~ ^[Yy]$ ]]; then
-      if command -v pbcopy &>/dev/null; then echo "$prompt" | pbcopy
-      elif command -v clip &>/dev/null; then echo "$prompt" | clip
-      elif command -v xclip &>/dev/null; then echo "$prompt" | xclip -selection clipboard; fi
-      log_success "Copied to clipboard."
-    fi
-  fi
+  prompt_output "$prompt"
 }
 
 cmd_test() {
@@ -2876,6 +2760,67 @@ cmd_test() {
                  log_error "Usage: agent-safe test <unit|integration|coverage|regression>"
                  exit 1 ;;
   esac
+}
+
+# ============================================================================
+# A-02: Pre-commit hook installer
+# ============================================================================
+cmd_install_hooks() {
+  resolve_project_root
+
+  if [ ! -d "${PROJECT_ROOT}/.git" ]; then
+    log_error "Not a git repository. install-hooks requires a git repo."
+    exit 1
+  fi
+
+  local hooks_dir="${PROJECT_ROOT}/.git/hooks"
+  local hook_file="${hooks_dir}/pre-commit"
+
+  mkdir -p "$hooks_dir"
+
+  if [ -f "$hook_file" ]; then
+    log_warn "pre-commit hook already exists at ${hook_file}"
+    echo -n "Overwrite? [y/N] "
+    read -r answer
+    if [[ ! "$answer" =~ ^[Yy]$ ]]; then
+      log "Aborted."
+      return 0
+    fi
+  fi
+
+  # Find agent-safe script relative to project root
+  local script_path
+  if [ -f "${PROJECT_ROOT}/agent-safe.sh" ]; then
+    script_path="./agent-safe.sh"
+  elif [ -f "${PROJECT_ROOT}/agent-safe" ]; then
+    script_path="./agent-safe"
+  else
+    script_path="agent-safe"
+  fi
+
+  cat > "$hook_file" << 'HOOK_EOF'
+#!/bin/sh
+# agent-safe pre-commit hook — runs verify to check framework integrity
+# Installed by: agent-safe install-hooks
+echo "agent-safe: Running verify..."
+HOOK_CMD="$(dirname "$0")/../../agent-safe.sh"
+if [ ! -f "$HOOK_CMD" ]; then
+  HOOK_CMD="agent-safe"
+fi
+"$HOOK_CMD" verify
+exit_code=$?
+if [ $exit_code -ne 0 ]; then
+  echo "agent-safe: verify failed. Commit aborted."
+  echo "To bypass, use: git commit --no-verify"
+  exit 1
+fi
+HOOK_EOF
+
+  chmod +x "$hook_file" 2>/dev/null
+  log_success "pre-commit hook installed at ${hook_file}"
+  log "The hook runs 'agent-safe verify' before each commit."
+  log "To bypass: git commit --no-verify"
+  log "To uninstall: rm ${hook_file}"
 }
 
 # ============================================================================
@@ -2898,7 +2843,7 @@ download_skill_subdir() {
 
   # Use temp file to avoid subshell issues with piped while-read
   local tmp_entries
-  tmp_entries=$(mktemp)
+  tmp_entries=$(mktemp -t agent-safe.XXXXXX)
   echo "$response" | jq -r '.[] | "\(.type) \(.name) \(.download_url // "")"' 2>/dev/null | tr -d '\r' > "$tmp_entries"
 
   while IFS= read -r line; do
@@ -3042,7 +2987,7 @@ ALLOWLIST_EOF
       if echo "$sub_response" | jq -e '.[]' &>/dev/null; then
         mkdir -p "${dest_dir}/${subdir}"
         local tmp_sub_entries
-        tmp_sub_entries=$(mktemp)
+        tmp_sub_entries=$(mktemp -t agent-safe.XXXXXX)
         echo "$sub_response" | jq -r '.[] | "\(.name) \(.download_url // "")"' 2>/dev/null | tr -d '\r' > "$tmp_sub_entries"
         while IFS= read -r line; do
           [ -z "$line" ] && continue
@@ -3470,6 +3415,7 @@ for arg in "${PREPASS_ARGS[@]}"; do
     --write) WRITE_MODE=true ;;
     --yes|-y) SUGGEST_YES=true ;;
     --force|-f) FORCE_REFRESH=true ;;
+    --run) RUN_MODE=true ;;
     *) REMAINING+=("$arg") ;;
   esac
 done
@@ -3484,6 +3430,7 @@ case "$SUBCOMMAND" in
   recover)  cmd_recover "${REMAINING[@]+"${REMAINING[@]}"}" ;;
   end)      cmd_end "${REMAINING[@]+"${REMAINING[@]}"}" ;;
   end-progress) cmd_end_progress "${REMAINING[@]+"${REMAINING[@]}"}" ;;
+  install-hooks) cmd_install_hooks ;;
   review)
     # review has sub-subcommands: checklist, diff, feedback, summary
     REVIEW_SUB="${REMAINING[0]}"

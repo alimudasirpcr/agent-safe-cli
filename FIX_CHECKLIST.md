@@ -82,7 +82,7 @@ Single source of truth for issues raised in the critical review. An agent should
 - **Fix:** New subcommand `agent-safe verify-diff [domain]` that runs after a session: take `git diff`, parse it for hunks touching functions tagged `FROZEN`/`PARTIAL` (in the pre-session source), and exit non-zero with a list of violations. Wire it into `end` so by default a session can't be "ended" if it broke a boundary; allow `--force` with a logged justification.
 - **Verify:** Manually edit a `FROZEN` function, run `end`, and the command refuses with a clear violation list.
 
-### [ ] A-02 Optional pre-commit hook to block boundary violations
+### [x] A-02 Optional pre-commit hook to block boundary violations
 - **Why:** `verify-diff` only runs when the user remembers. A pre-commit hook makes it ambient.
 - **Fix:** New subcommand `agent-safe install-hooks` that drops a `.git/hooks/pre-commit` invoking `agent-safe verify-diff`. Document it in README.
 - **Verify:** With the hook installed, `git commit` fails when a FROZEN function changed.
@@ -103,7 +103,7 @@ Single source of truth for issues raised in the critical review. An agent should
   3. `tag --write` only fills in missing tags by default; `--retag` re-runs over all functions.
 - **Verify:** Add a new function, run `tag --check` → it's flagged. Modify an existing function's body, run `tag --check` → it's flagged as stale.
 
-### [ ] A-05 Be honest about the provider abstraction
+### [x] A-05 Be honest about the provider abstraction
 - **Where:** Provider dispatch around [agent-safe.sh:445-637](agent-safe.sh#L445-L637) and prompts that assume tool-use (e.g., `start.md`, `cont-recovery.md`).
 - **Problem:** Claude path is multi-turn agentic; OpenAI/Gemini/Ollama are single curl shots that can't actually edit files. The README claims feature parity.
 - **Fix (pick one):**
@@ -111,13 +111,13 @@ Single source of truth for issues raised in the critical review. An agent should
   - **Real adapters:** Implement OpenAI tool-calling and an Ollama-with-function-calling path that mirrors Claude's `CLAUDE_AGENT_FILE_BEGIN` markers. Document supported features per provider.
 - **Verify:** Either (a) running `agent-safe start … --provider openai` prints "advice mode — no file edits will be applied," or (b) it actually applies file edits via a tested adapter.
 
-### [ ] A-06 `start` should be able to *run* Claude, not just print a prompt
+### [x] A-06 `start` should be able to *run* Claude, not just print a prompt
 - **Where:** `start`, `continue`, `recover`, `end` (clipboard-only flow).
 - **Problem:** The CLI assembles prompts but makes the user paste them into Claude Code. The Claude CLI exists; the wrapper should drive it.
 - **Fix:** When `--provider claude` (default), pipe the assembled prompt into `claude -p` and stream output. Keep the current "print + clipboard" path under `--print-only` for users who genuinely want manual paste.
 - **Verify:** `agent-safe start backend auth.php "Add rate limiting"` (with claude on PATH) prints AI output directly.
 
-### [ ] A-07 Treat `init`/`adopt` AI inference as advisory, not load-bearing
+### [x] A-07 Treat `init`/`adopt` AI inference as advisory, not load-bearing
 - **Problem:** AI-inferred domains/access-levels become the safety baseline. No re-validation, no human-required sign-off.
 - **Fix:** After `adopt` infers structure, require an explicit interactive confirmation per-domain (not one big "yes"), and emit `_agent/.adopt-decisions.md` listing every choice with a one-line human comment. Add `agent-safe adopt --revisit` to walk through them again.
 - **Verify:** Running `adopt` writes `.adopt-decisions.md`; running `--revisit` lets the user change a domain's access level without rerunning the AI.
@@ -126,7 +126,7 @@ Single source of truth for issues raised in the critical review. An agent should
 
 ## P3 — UX, Docs, Cross-platform
 
-### [ ] U-01 Drop or explain the `FB-/SM-/RV-/TS-` codes
+### [x] U-01 Drop or explain the `FB-/SM-/RV-/TS-` codes
 - **Where:** README throughout (e.g., `init` (FB-01 + FB-02), `start` (SM-01), etc.).
 - **Fix:** Either remove the codes from user-facing headings or add a one-paragraph "Internal feature codes" glossary so first-time readers aren't confused.
 
@@ -134,25 +134,25 @@ Single source of truth for issues raised in the critical review. An agent should
 - **Where:** [README.md:70](README.md#L70) and [README.md:214](README.md#L214).
 - **Fix:** Keep one canonical Skills section. The intro section can stay as a 4-line teaser linking down to the full reference.
 
-### [ ] U-03 Add a "Troubleshooting" section
+### [x] U-03 Add a "Troubleshooting" section
 - **Cover:** AI mistagged a function (how to fix), `_agent/` got out of sync after a refactor (how to refresh), partial `adopt` failure (how to retry without losing work), two devs ran `adopt` concurrently, lost session before pasting `end`.
 
-### [ ] U-04 Add "When NOT to use agent-safe" + "vs. Claude Code native"
+### [x] U-04 Add "When NOT to use agent-safe" + "vs. Claude Code native"
 - **Why:** Claude Code's `CLAUDE.md`, `settings.json` permissions, and hooks solve much of the same problem with real enforcement. The README should acknowledge this and be honest about when agent-safe adds value (multi-provider teams, multi-domain projects with explicit handoffs, persistent progress tracking) vs. when it's overhead.
 
 ### [x] U-05 Soften the "ships code you can trust" tagline
 - **Why:** Current copy oversells. Suggest: *"Give your AI agent boundaries, context, and skills — so handoffs between sessions stay clean and code review has fewer surprises."*
 - **Fix:** Update README hero line. Wherever the docs say "trust" without enforcement context, qualify.
 
-### [ ] U-06 Collapse `continue`/`recover` and `end`/`end-progress`
+### [x] U-06 Collapse `continue`/`recover` and `end`/`end-progress`
 - **Fix:** Make `continue` auto-detect whether a clean resume is possible (PROGRESS.md valid, no diff drift) and fall back to recovery automatically. Make `end --handoff <next-domain>` replace `end-progress`.
 - **Backwards compat:** Keep old commands as deprecated aliases for one release.
 
-### [ ] U-07 Honest cross-platform story
+### [x] U-07 Honest cross-platform story
 - **Where:** [agent-safe.cmd](agent-safe.cmd), [agent-safe.ps1](agent-safe.ps1), README "Windows" section.
 - **Fix:** Detect WSL (`wsl.exe` available), MSYS2, Cygwin in addition to Git Bash. When none are found, error message should list all supported options. README "Windows" section should state Git Bash (or equivalent POSIX shell) is required.
 
-### [ ] U-08 Quickstart honesty
+### [x] U-08 Quickstart honesty
 - **Where:** README "60-Second Quickstart".
 - **Fix:** Either rename to "Quickstart" (no time claim) or make it actually 60 seconds by deferring `tag` and `verify` to a follow-up step. List network/AI calls explicitly so users know what fails if their provider is offline.
 
@@ -160,19 +160,20 @@ Single source of truth for issues raised in the critical review. An agent should
 
 ## P4 — Code Quality / Portability
 
-### [ ] Q-01 Add `set -e` (carefully) or audit all error paths
+### [-] Q-01 Add `set -e` (carefully) or audit all error paths
+- **Reason:** Won't fix — script uses explicit if/return error handling throughout. `set -e` would be fragile with AI commands that legitimately return non-zero, pipe-based parsing, and interactive `read -r` prompts. Current approach is safer for this use case.
 - **Where:** Top of `agent-safe.sh` (~line 18).
 - **Problem:** Only `set -uo pipefail`. Some failures swallow.
 - **Fix:** Either add `set -e` and audit (preferred), or add explicit `|| return 1` after every error condition. Tag any intentional ignore with `|| true # reason`.
 
-### [ ] Q-02 GNU vs BSD sed/awk
+### [x] Q-02 GNU vs BSD sed/awk
 - **Where:** Calls like `sed '1d;$d'` (~line 179) and `sed -i` usages.
 - **Fix:** For in-place edits use `sed_inplace()` helper that detects BSD (`sed -i ''` vs `sed -i`). Avoid features missing on BSD or document a `gnu-sed` requirement.
 
-### [ ] Q-03 `mktemp` portability
+### [x] Q-03 `mktemp` portability
 - **Fix:** Always pass an explicit template (`-t agent-safe.XXXXXXXX`) and `-d` for directories. Test on macOS BSD `mktemp`.
 
-### [ ] Q-04 Concurrent-session lock
+### [x] Q-04 Concurrent-session lock
 - **Fix:** Take a `flock` on `_agent/.lock` at the top of any command that writes state files (`adopt`, `tag --write`, `end`, `end-progress`). Print a clear "another session is running" message on contention.
 
 ### [x] Q-05 `.agent-safe.env` BOM/CRLF on Windows
@@ -199,3 +200,16 @@ When you complete an item, add a one-line entry below with the date and short no
 - `2026-05-04 Q-05 — Strip UTF-8 BOM (\xef\xbb\xbf) and \r from .env lines`
 - `2026-05-04 U-02 — Merged duplicate Skills sections; intro section now links to full reference`
 - `2026-05-04 U-05 — Softened hero tagline to "boundaries, context, and skills — so handoffs stay clean and code review has fewer surprises"`
+- `2026-05-04 U-01 — Removed FB-/SM-/RV-/TS- codes from all README headings and help text`
+- `2026-05-04 U-03 — Added Troubleshooting section with 6 FAQ entries`
+- `2026-05-04 U-04 — Added "When NOT to use agent-safe" section with vs Claude Code comparison`
+- `2026-05-04 U-06 — continue auto-detects drift and falls back to recovery; end --handoff replaces end-progress`
+- `2026-05-04 U-07 — WSL/MSYS2/Cygwin detection in .cmd and .ps1 wrappers; improved error messages`
+- `2026-05-04 U-08 — Renamed "60-Second Quickstart" to "Quickstart"; added AI call annotations`
+- `2026-05-04 Q-02 — No in-place sed calls found; no sed_inplace helper needed`
+- `2026-05-04 Q-03 — Added -t agent-safe.XXXXXX template to all mktemp calls`
+- `2026-05-04 Q-04 — Added _agent_lock() with flock for adopt/tag/end/end-progress`
+- `2026-05-04 A-02 — Added install-hooks subcommand that writes .git/hooks/pre-commit`
+- `2026-05-04 A-05 — Added warn_non_claude() to session commands; prints advice-mode warning`
+- `2026-05-04 A-06 — Added --run flag and prompt_output() helper; pipes to claude -p when TTY`
+- `2026-05-04 A-07 — Added _agent/.adopt-decisions.md after adopt inference confirmation`

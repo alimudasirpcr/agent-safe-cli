@@ -4,6 +4,12 @@
 
 agent-safe is a CLI that wraps any AI coding agent (Claude, OpenAI, Gemini, Ollama, or your own) with scoped domains, permission boundaries, progress tracking, and skill injection. It assembles structured prompts so the AI knows exactly what it can and can't touch.
 
+## When NOT to use agent-safe
+
+If you're already using **Claude Code** with `CLAUDE.md` rules, `settings.json` permissions, and pre-commit hooks, you have real enforcement for single-agent workflows. agent-safe adds value when you need **multi-domain scoping** (different permission boundaries for different parts of the codebase), **cross-provider support** (OpenAI, Gemini, Ollama, custom), **persistent progress tracking** between sessions, or **explicit handoffs** between developers. If you're a solo Claude Code user with a simple project, the built-in tools may be enough.
+
+---
+
 ## Why agent-safe?
 
 Without guardrails, AI agents modify the wrong files, break existing logic, and lose context between sessions. agent-safe solves this by:
@@ -14,7 +20,7 @@ Without guardrails, AI agents modify the wrong files, break existing logic, and 
 - **Injecting skills** — pull specialized instructions (webapp testing, MCP building, etc.) from the [Anthropic Skills](https://github.com/anthropics/skills) registry and inject them into sessions
 - **Multi-provider** — works with Claude, OpenAI, Gemini, Ollama, or any custom command
 
-## 60-Second Quickstart
+## Quickstart
 
 ```bash
 # 1. Clone into your project
@@ -31,18 +37,22 @@ cp .agent-safe-cli/agent-safe.env.example .agent-safe.env
 # 3. Set your AI provider in .agent-safe.env
 #    AGENT_SAFE_PROVIDER=claude    # or openai, gemini, ollama, custom
 
-# 4. Set up your project (one-time)
+# 4. Set up your project (calls AI — needs provider configured)
 ./agent-safe adopt          # infer structure from your codebase
-./agent-safe tag --write    # tag functions with permission levels
 ./agent-safe verify         # confirm everything looks good
 
-# 5. Start a scoped session
+# 5. Tag functions (optional, calls AI)
+./agent-safe tag --write    # tag functions with permission levels
+
+# 6. Start a scoped session (no AI call — prints prompt for you to paste)
 ./agent-safe start backend auth.php "Add rate limiting"
 
-# 6. Add skills (optional)
+# 7. Add skills (optional, calls AI for suggestions)
 ./agent-safe skill suggest   # AI recommends skills based on your README
 ./agent-safe start backend auth.php "Add rate limiting" --skill webapp-testing
 ```
+
+> **Which steps call AI?** Steps 4–5 and 7 call your configured AI provider. Steps 6 and 8 just assemble prompts locally. If your provider is offline, adopt/verify/tag/suggest will fail — but start/continue/end always work.
 
 ## How It Works
 
@@ -89,17 +99,17 @@ agent-safe start backend auth.php "Add rate limiting" --skill webapp-testing
 Generate tests, check coverage, and run regression checks before sessions. All commands print a prompt you paste into your AI session.
 
 ```bash
-# TS-01: Generate unit tests for specific functions
+# Generate unit tests for specific functions
 agent-safe test unit backend auth.php "addUser, validateToken"
 agent-safe test unit backend auth.php "addUser" --skill webapp-testing
 
-# TS-02: Generate integration tests for a domain
+# Generate integration tests for a domain
 agent-safe test integration backend
 
-# TS-03: Get a test coverage report (read-only analysis)
+# Get a test coverage report (read-only analysis)
 agent-safe test coverage backend
 
-# TS-04: Run regression check before starting a session
+# Run regression check before starting a session
 agent-safe test regression backend auth.php
 ```
 
@@ -382,7 +392,7 @@ Every AI call saves output to a unique temp directory (created with `mktemp`). T
 
 ## Setup Commands
 
-### `init` — New Project Setup (FB-01 + FB-02)
+### `init` — New Project Setup
 
 Interactive setup for a brand-new project. Asks six sections of questions, then generates all `_agent/` files via AI.
 
@@ -410,7 +420,7 @@ The interactive questions cover:
 
 ---
 
-### `adopt` — Existing Project Setup (FB-03)
+### `adopt` — Existing Project Setup
 
 Automatically infers project structure from source files and README, then generates `_agent/` files.
 
@@ -434,7 +444,7 @@ Automatically infers project structure from source files and README, then genera
 
 ---
 
-### `tag` — Function Permission Tags (FB-04)
+### `tag` — Function Permission Tags
 
 Scans source files and generates `@agent` permission tags (FROZEN / PARTIAL / FULL-SCOPE) for each function.
 
@@ -472,7 +482,7 @@ ceiling(n: number): number {
 
 ---
 
-### `verify` — Post-Setup Checklist (FB-05)
+### `verify` — Post-Setup Checklist
 
 Two-phase check: fast local validation, then deep AI-powered verification.
 
@@ -501,7 +511,7 @@ Two-phase check: fast local validation, then deep AI-powered verification.
 
 These commands assemble a prompt with all the context an AI agent needs, then offer to copy it to your clipboard. You paste it into a new AI session.
 
-### `start` — Begin a Session (SM-01)
+### `start` — Begin a Session
 
 Assembles a session prompt with domain, file, task, permission boundaries, rules, and git state.
 
@@ -556,7 +566,7 @@ When a task spans multiple domains (e.g., add a method AND expose it in the CLI)
 
 ---
 
-### `continue` — Resume a Session (SM-02)
+### `continue` — Resume a Session
 
 Assembles a prompt that tells the AI to read the domain's PROGRESS.md and INSTRUCTIONS, then pick up from the NEXT list.
 
@@ -565,7 +575,7 @@ Assembles a prompt that tells the AI to read the domain's PROGRESS.md and INSTRU
 .\agent-safe continue calculator-core
 ```
 
-### `recover` — Context Recovery (SM-03)
+### `recover` — Context Recovery
 
 Assembles a prompt that tells the AI to read rules and progress, run a git diff, and report current state — without writing any code.
 
@@ -574,7 +584,7 @@ Assembles a prompt that tells the AI to read rules and progress, run a git diff,
 .\agent-safe recover calculator-core src/calculator.ts
 ```
 
-### `end` — Close a Session (SM-04)
+### `end` — Close a Session
 
 Assembles a prompt that tells the AI to update progress files and archive the session.
 
@@ -583,7 +593,7 @@ Assembles a prompt that tells the AI to update progress files and archive the se
 .\agent-safe end calculator-core
 ```
 
-### `end-progress` — Master Progress Update (SM-05)
+### `end-progress` — Master Progress Update
 
 Updates `_agent/MASTER-PROGRESS.md` when you finish a domain and want to move to the next one.
 
@@ -599,27 +609,27 @@ Updates `_agent/MASTER-PROGRESS.md` when you finish a domain and want to move to
 
 The `review` command has four sub-commands for the code review phase.
 
-### `review checklist` — Review Checklist Generator (RV-01)
+### `review checklist` — Review Checklist Generator
 
 ```bash
 .\agent-safe review checklist "Add ceiling method"
 .\agent-safe review checklist calculator-core "Add ceiling method"
 ```
 
-### `review diff` — Diff Explainer (RV-02)
+### `review diff` — Diff Explainer
 
 ```bash
 .\agent-safe review diff
 .\agent-safe review diff calculator-core
 ```
 
-### `review feedback` — Review Feedback Handler (RV-03)
+### `review feedback` — Review Feedback Handler
 
 ```bash
 .\agent-safe review feedback calculator-core "The ceiling method doesn't handle NaN"
 ```
 
-### `review summary` — Review Summary (RV-04)
+### `review summary` — Review Summary
 
 ```bash
 .\agent-safe review summary "Add ceiling method"
@@ -727,3 +737,25 @@ ceiling(n: number): number {
 ```
 
 The `start` command extracts these tags to build the FROZEN/PARTIAL/FULL-SCOPE lists in the session prompt. If the INSTRUCTIONS.summary.md permission table is empty, it falls back to scanning source files for `@agent` tags.
+
+---
+
+## Troubleshooting
+
+**AI mistagged a function — how do I fix it?**
+Find the `@agent:` comment above the function in your source code and edit the tag (`FROZEN`, `PARTIAL`, or `FULL-SCOPE`). Then run `./agent-safe verify` to confirm the change.
+
+**`_agent/` got out of sync after a refactor — how do I refresh it?**
+Delete the stale domain directory under `_agent/`, then re-run `./agent-safe adopt`. It will re-scan your codebase and regenerate the state files.
+
+**Partial `adopt` failure — can I retry without losing work?**
+Yes. `adopt` creates each domain's files independently. If it failed mid-way, the domains that completed are still valid. Re-running `adopt` will overwrite existing `_agent/` files — review them before confirming.
+
+**Two developers ran `adopt` concurrently — what now?**
+`adopt` overwrites `_agent/` state files. If two people run it simultaneously, the last one wins. Commit `_agent/` to git after setup so you can resolve merge conflicts the usual way.
+
+**Lost the session before pasting `end` — what to do?**
+Run `./agent-safe recover`. It assembles a prompt that tells the AI to read your rules and progress, run a git diff, and report current state — so you can pick up where you left off.
+
+**`adopt` or `verify` fails with "AI provider not found" — what's wrong?**
+Your AI provider isn't configured or isn't on your PATH. Check `AGENT_SAFE_PROVIDER` in `.agent-safe.env`. For Claude, make sure `claude` CLI is installed. For OpenAI/Gemini, check that `OPENAI_API_KEY` or `GEMINI_API_KEY` is set. For Ollama, verify the `ollama` binary is available.
